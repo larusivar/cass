@@ -5,9 +5,16 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::connectors::{Connector, DetectionResult, NormalizedConversation, NormalizedMessage, NormalizedSnippet, ScanContext};
+use crate::connectors::{
+    Connector, DetectionResult, NormalizedConversation, NormalizedMessage, ScanContext,
+};
 
 pub struct CodexConnector;
+impl Default for CodexConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CodexConnector {
     pub fn new() -> Self {
@@ -27,12 +34,14 @@ impl CodexConnector {
             return out;
         }
         for entry in WalkDir::new(sessions).into_iter().flatten() {
-            if entry.file_type().is_file() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("rollout-") && name.ends_with(".jsonl") {
-                        out.push(entry.path().to_path_buf());
-                    }
-                }
+            if entry.file_type().is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+                    .unwrap_or(false)
+            {
+                out.push(entry.path().to_path_buf());
             }
         }
         out
@@ -71,7 +80,8 @@ impl Connector for CodexConnector {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let val: Value = serde_json::from_str(line).unwrap_or(Value::String(line.to_string()));
+                let val: Value =
+                    serde_json::from_str(line).unwrap_or(Value::String(line.to_string()));
                 let role_str = val
                     .get("role")
                     .or_else(|| val.get("speaker"))
@@ -110,7 +120,7 @@ impl Connector for CodexConnector {
             }
 
             let title = messages
-                .get(0)
+                .first()
                 .and_then(|m| m.content.lines().next())
                 .map(|s| s.to_string());
 

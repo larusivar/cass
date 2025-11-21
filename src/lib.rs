@@ -8,8 +8,8 @@ pub mod ui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 use indexer::IndexOptions;
+use std::path::PathBuf;
 
 /// Command-line interface.
 #[derive(Parser, Debug)]

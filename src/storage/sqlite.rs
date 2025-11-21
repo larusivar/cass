@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -88,6 +88,59 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv_idx
 
 CREATE INDEX IF NOT EXISTS idx_messages_created
     ON messages(created_at);
+"#;
+
+const MIGRATION_V2: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
+    content,
+    title,
+    agent,
+    workspace,
+    source_path,
+    created_at UNINDEXED,
+    message_id UNINDEXED,
+    tokenize='porter'
+);
+INSERT INTO fts_messages(content, title, agent, workspace, source_path, message_id)
+SELECT
+    m.content,
+    c.title,
+    a.slug,
+    w.path,
+    c.source_path,
+    m.created_at,
+    m.id
+FROM messages m
+JOIN conversations c ON m.conversation_id = c.id
+JOIN agents a ON c.agent_id = a.id
+LEFT JOIN workspaces w ON c.workspace_id = w.id;
+"#;
+
+const MIGRATION_V3: &str = r#"
+DROP TABLE IF EXISTS fts_messages;
+CREATE VIRTUAL TABLE fts_messages USING fts5(
+    content,
+    title,
+    agent,
+    workspace,
+    source_path,
+    created_at UNINDEXED,
+    message_id UNINDEXED,
+    tokenize='porter'
+);
+INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+SELECT
+    m.content,
+    c.title,
+    a.slug,
+    w.path,
+    c.source_path,
+    m.created_at,
+    m.id
+FROM messages m
+JOIN conversations c ON m.conversation_id = c.id
+JOIN agents a ON c.agent_id = a.id
+LEFT JOIN workspaces w ON c.workspace_id = w.id;
 "#;
 
 pub struct SqliteStorage {
@@ -180,6 +233,7 @@ impl SqliteStorage {
         for msg in &conv.messages {
             let msg_id = insert_message(&tx, conv_id, msg)?;
             insert_snippets(&tx, msg_id, &msg.snippets)?;
+            insert_fts_message(&tx, msg_id, msg, conv)?;
         }
         tx.commit()?;
         Ok(conv_id)
@@ -237,6 +291,23 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     match current {
         0 => {
             conn.execute_batch(MIGRATION_V1)?;
+            conn.execute_batch(MIGRATION_V2)?;
+            conn.execute_batch(MIGRATION_V3)?;
+            conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                params![SCHEMA_VERSION.to_string()],
+            )?;
+        }
+        1 => {
+            conn.execute_batch(MIGRATION_V2)?;
+            conn.execute_batch(MIGRATION_V3)?;
+            conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                params![SCHEMA_VERSION.to_string()],
+            )?;
+        }
+        2 => {
+            conn.execute_batch(MIGRATION_V3)?;
             conn.execute(
                 "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                 params![SCHEMA_VERSION.to_string()],
@@ -306,6 +377,31 @@ fn insert_snippets(tx: &Transaction<'_>, message_id: i64, snippets: &[Snippet]) 
             ],
         )?;
     }
+    Ok(())
+}
+
+fn insert_fts_message(
+    tx: &Transaction<'_>,
+    message_id: i64,
+    msg: &Message,
+    conv: &Conversation,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+         VALUES(?,?,?,?,?,?,?)",
+        params![
+            msg.content,
+            conv.title.clone().unwrap_or_default(),
+            conv.agent_slug.clone(),
+            conv.workspace
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path_to_string(&conv.source_path),
+            msg.created_at,
+            message_id
+        ],
+    )?;
     Ok(())
 }
 

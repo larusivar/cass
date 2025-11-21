@@ -40,6 +40,10 @@ pub enum Commands {
         /// Watch for changes and reindex automatically
         #[arg(long)]
         watch: bool,
+
+        /// Override data dir (index + db). Defaults to platform data dir.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 }
 
@@ -48,13 +52,22 @@ pub async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Tui => ui::tui::run_tui(),
-        Commands::Index { full, watch } => run_index(cli.db, full, watch),
+        Commands::Index {
+            full,
+            watch,
+            data_dir,
+        } => run_index_with_data(cli.db, full, watch, data_dir),
     }
 }
 
-fn run_index(db_override: Option<PathBuf>, full: bool, watch: bool) -> Result<()> {
-    let db_path = db_override.unwrap_or_else(default_db_path);
-    let data_dir = default_data_dir();
+fn run_index_with_data(
+    db_override: Option<PathBuf>,
+    full: bool,
+    watch: bool,
+    data_dir_override: Option<PathBuf>,
+) -> Result<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
     let opts = IndexOptions {
         full,
         watch,

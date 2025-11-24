@@ -36,20 +36,21 @@ jobs:
         run: cargo install cargo-dist --locked --root ~/.cargo
       - name: Add cargo bin to PATH
         run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      - name: dist init
-        run: ~/.cargo/bin/dist init --yes --ci github --installer shell --installer powershell
       - name: Build distributions
         env:
           CARGO_TERM_COLOR: always
         run: |
           ~/.cargo/bin/dist build --installer shell --installer powershell
+      - name: List dist contents
+        run: ls -laR target/dist
       - name: Checksums
         run: |
           cd target/dist
           find . -maxdepth 1 -type f ! -name "*.sha256" -print0 | while IFS= read -r -d '' f; do
             # Strip leading ./ from find output
             filename="${f#./}"
-            sha256sum "$filename" > "$filename.sha256";
+            echo "Hashing $filename ..."
+            sha256sum "$filename" > "$filename.sha256" || { echo "Failed to hash $filename"; exit 1; }
           done
       - name: Upload artifacts (workflow)
         uses: actions/upload-artifact@v4

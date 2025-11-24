@@ -84,7 +84,7 @@ fn install_easy_mode_end_to_end() {
     // Verify installation
     let bin = dest.path().join("cass");
     assert!(bin.exists(), "Binary not found at expected path");
-    
+
     // Verify self-test worked (printed version)
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("fixture-linux"));

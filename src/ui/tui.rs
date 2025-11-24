@@ -540,13 +540,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     MatchMode::Prefix => "prefix",
                 };
                 let chips = chips_for_filters(&filters, palette);
-                let sb = search_bar(
-                    &bar_text,
-                    palette,
-                    input_mode,
-                    mode_label,
-                    chips,
-                );
+                let sb = search_bar(&bar_text, palette, input_mode, mode_label, chips);
                 f.render_widget(sb, chunks[0]);
 
                 // Filter pills row
@@ -626,7 +620,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         }
                     } else {
                         lines.push(Line::from("No results found."));
-                        
+
                         // Zero-hit suggestions
                         let mut suggestions = Vec::new();
                         if !filters.agents.is_empty() {
@@ -639,11 +633,11 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             suggestions.push("Try prefix mode (F9)");
                         }
                         if !suggestions.is_empty() {
-                             lines.push(Line::from(""));
-                             lines.push(Line::from(Span::styled("Suggestions:", palette.title())));
-                             for s in suggestions {
-                                 lines.push(Line::from(format!("• {s}")));
-                             }
+                            lines.push(Line::from(""));
+                            lines.push(Line::from(Span::styled("Suggestions:", palette.title())));
+                            for s in suggestions {
+                                lines.push(Line::from(format!("• {s}")));
+                            }
                         }
 
                         lines.push(Line::from(""));
@@ -748,7 +742,11 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             .block(block)
                             .highlight_style(
                                 Style::default()
-                                    .bg(if is_focused_pane { theme.accent } else { palette.hint })
+                                    .bg(if is_focused_pane {
+                                        theme.accent
+                                    } else {
+                                        palette.hint
+                                    })
                                     .fg(theme.bg)
                                     .add_modifier(Modifier::BOLD),
                             )
@@ -869,10 +867,14 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                     Paragraph::new("No messages")
                                         .style(Style::default().fg(palette.hint))
                                 } else {
-                                    Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((detail_scroll, 0))
+                                    Paragraph::new(lines)
+                                        .wrap(Wrap { trim: true })
+                                        .scroll((detail_scroll, 0))
                                 }
                             } else {
-                                Paragraph::new(hit.content.clone()).wrap(Wrap { trim: true }).scroll((detail_scroll, 0))
+                                Paragraph::new(hit.content.clone())
+                                    .wrap(Wrap { trim: true })
+                                    .scroll((detail_scroll, 0))
                             }
                         }
                         DetailTab::Snippets => {
@@ -910,7 +912,9 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                     Paragraph::new("No snippets attached.")
                                         .style(Style::default().fg(palette.hint))
                                 } else {
-                                    Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((detail_scroll, 0))
+                                    Paragraph::new(lines)
+                                        .wrap(Wrap { trim: true })
+                                        .scroll((detail_scroll, 0))
                                 }
                             } else {
                                 Paragraph::new("No snippets loaded")
@@ -934,20 +938,23 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 }
                                 text.push_str("Metadata:\n");
                                 text.push_str(&meta);
-                                Paragraph::new(text).wrap(Wrap { trim: true }).scroll((detail_scroll, 0))
+                                Paragraph::new(text)
+                                    .wrap(Wrap { trim: true })
+                                    .scroll((detail_scroll, 0))
                             } else {
                                 Paragraph::new(format!("Path: {}", hit.source_path))
-                                    .wrap(Wrap { trim: true }).scroll((detail_scroll, 0))
+                                    .wrap(Wrap { trim: true })
+                                    .scroll((detail_scroll, 0))
                             }
                         }
                     };
-                    
+
                     let is_focused_detail = matches!(focus_region, FocusRegion::Detail);
                     let block = Block::default()
                         .title("Detail")
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(if is_focused_detail {
-                            palette.accent 
+                            palette.accent
                         } else {
                             palette.hint
                         }));
@@ -1106,7 +1113,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                         cached_detail = None;
                                         detail_scroll = 0;
                                     }
-                                },
+                                }
                                 FocusRegion::Detail => {
                                     detail_scroll = detail_scroll.saturating_add(1);
                                 }
@@ -1130,67 +1137,64 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                         cached_detail = None;
                                         detail_scroll = 0;
                                     }
-                                },
+                                }
                                 FocusRegion::Detail => {
                                     detail_scroll = detail_scroll.saturating_sub(1);
                                 }
                             }
                         }
-                        KeyCode::Left => {
-                            match focus_region {
-                                FocusRegion::Results => {
-                                    active_pane = active_pane.saturating_sub(1);
-                                    focus_flash_until = Some(Instant::now() + Duration::from_millis(220));
-                                    cached_detail = None;
-                                    detail_scroll = 0;
-                                },
-                                FocusRegion::Detail => {
-                                    focus_region = FocusRegion::Results;
-                                    status = "Focus: Results".to_string();
-                                }
+                        KeyCode::Left => match focus_region {
+                            FocusRegion::Results => {
+                                active_pane = active_pane.saturating_sub(1);
+                                focus_flash_until =
+                                    Some(Instant::now() + Duration::from_millis(220));
+                                cached_detail = None;
+                                detail_scroll = 0;
                             }
-                        }
+                            FocusRegion::Detail => {
+                                focus_region = FocusRegion::Results;
+                                status = "Focus: Results".to_string();
+                            }
+                        },
                         KeyCode::Right => {
                             match focus_region {
                                 FocusRegion::Results => {
                                     if active_pane + 1 < panes.len() {
                                         active_pane += 1;
-                                        focus_flash_until = Some(Instant::now() + Duration::from_millis(220));
+                                        focus_flash_until =
+                                            Some(Instant::now() + Duration::from_millis(220));
                                         cached_detail = None;
                                         detail_scroll = 0;
                                     } else if !panes.is_empty() {
                                         // At last pane, switch focus to detail
                                         focus_region = FocusRegion::Detail;
-                                        status = "Focus: Detail (arrows scroll, Left back)".to_string();
+                                        status =
+                                            "Focus: Detail (arrows scroll, Left back)".to_string();
                                     }
-                                },
+                                }
                                 FocusRegion::Detail => {
                                     // Already at rightmost
                                 }
                             }
                         }
-                        KeyCode::PageDown => {
-                            match focus_region {
-                                FocusRegion::Results => {
-                                    page = page.saturating_add(1);
-                                    dirty_since = Some(Instant::now());
-                                },
-                                FocusRegion::Detail => {
-                                    detail_scroll = detail_scroll.saturating_add(20);
-                                }
+                        KeyCode::PageDown => match focus_region {
+                            FocusRegion::Results => {
+                                page = page.saturating_add(1);
+                                dirty_since = Some(Instant::now());
                             }
-                        }
-                        KeyCode::PageUp => {
-                            match focus_region {
-                                FocusRegion::Results => {
-                                    page = page.saturating_sub(1);
-                                    dirty_since = Some(Instant::now());
-                                },
-                                FocusRegion::Detail => {
-                                    detail_scroll = detail_scroll.saturating_sub(20);
-                                }
+                            FocusRegion::Detail => {
+                                detail_scroll = detail_scroll.saturating_add(20);
                             }
-                        }
+                        },
+                        KeyCode::PageUp => match focus_region {
+                            FocusRegion::Results => {
+                                page = page.saturating_sub(1);
+                                dirty_since = Some(Instant::now());
+                            }
+                            FocusRegion::Detail => {
+                                detail_scroll = detail_scroll.saturating_sub(20);
+                            }
+                        },
                         KeyCode::Char('y') => {
                             if let Some(hit) = active_hit(&panes, active_pane) {
                                 let text_to_copy = if matches!(focus_region, FocusRegion::Detail) {
@@ -1202,7 +1206,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 } else {
                                     hit.source_path.clone()
                                 };
-                                
+
                                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                                 {
                                     use std::process::Stdio;
@@ -1211,8 +1215,8 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                         .arg("if command -v wl-copy >/dev/null; then wl-copy; elif command -v pbcopy >/dev/null; then pbcopy; elif command -v xclip >/dev/null; then xclip -selection clipboard; fi")
                                         .stdin(Stdio::piped())
                                         .spawn();
-                                    if let Ok(mut child) = child 
-                                        && let Some(mut stdin) = child.stdin.take() 
+                                    if let Ok(mut child) = child
+                                        && let Some(mut stdin) = child.stdin.take()
                                     {
                                         use std::io::Write;
                                         let _ = stdin.write_all(text_to_copy.as_bytes());
@@ -1220,7 +1224,8 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                         let _ = child.wait();
                                         status = "Copied to clipboard".to_string();
                                     } else {
-                                        status = "Clipboard copy failed (missing tool?)".to_string();
+                                        status =
+                                            "Clipboard copy failed (missing tool?)".to_string();
                                     }
                                 }
                                 #[cfg(target_os = "windows")]
@@ -1230,8 +1235,8 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                         .arg("$Input | Set-Clipboard")
                                         .stdin(std::process::Stdio::piped())
                                         .spawn();
-                                     if let Ok(mut child) = child 
-                                        && let Some(mut stdin) = child.stdin.take() 
+                                    if let Ok(mut child) = child
+                                        && let Some(mut stdin) = child.stdin.take()
                                     {
                                         use std::io::Write;
                                         let _ = stdin.write_all(text_to_copy.as_bytes());
@@ -1429,7 +1434,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             if matches!(focus_region, FocusRegion::Detail) {
                                 focus_region = FocusRegion::Results;
                             }
-                            
+
                             if key.modifiers.contains(KeyModifiers::ALT) {
                                 if ('1'..='9').contains(&c) {
                                     let target = c.to_digit(10).unwrap_or(1) as usize - 1;

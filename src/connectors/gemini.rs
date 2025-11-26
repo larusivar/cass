@@ -9,6 +9,104 @@ use crate::connectors::{
     Connector, DetectionResult, NormalizedConversation, NormalizedMessage, ScanContext,
 };
 
+/// Extract actual workspace path from message content.
+/// Gemini stores sessions by hash, but messages often contain the actual project path
+/// in patterns like "# AGENTS.md instructions for /data/projects/foo" or file paths.
+fn extract_workspace_from_content(messages: &[NormalizedMessage]) -> Option<PathBuf> {
+    // Patterns to look for workspace paths in messages:
+    // 1. AGENTS.md header: "# AGENTS.md instructions for /path/to/project"
+    // 2. Working directory: "Working directory: /path/to/project"
+    // 3. Common project paths: /data/projects/X
+
+    for msg in messages {
+        // Try AGENTS.md pattern first (most reliable)
+        // Pattern: "AGENTS.md instructions for /path/to/project"
+        if let Some(idx) = msg.content.find("AGENTS.md instructions for ") {
+            let start = idx + "AGENTS.md instructions for ".len();
+            if let Some(path) = extract_path_from_position(&msg.content, start) {
+                return Some(path);
+            }
+        }
+
+        // Try working directory pattern
+        // Pattern: "Working directory: /path/to/project"
+        if let Some(idx) = msg.content.find("Working directory:") {
+            let start = idx + "Working directory:".len();
+            if let Some(path) = extract_path_from_position(&msg.content, start) {
+                return Some(path);
+            }
+        }
+    }
+
+    // Fallback: look for common project path patterns in first few messages
+    for msg in messages.iter().take(5) {
+        // Look for /data/projects/ paths
+        if let Some(idx) = msg.content.find("/data/projects/")
+            && let Some(path) = extract_path_from_position(&msg.content, idx)
+        {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Extract a path starting from the given position in the string.
+/// Stops at whitespace, newlines, or common delimiters.
+/// Returns the project directory (truncates at file extensions or deep paths).
+fn extract_path_from_position(content: &str, start: usize) -> Option<PathBuf> {
+    let rest = content.get(start..)?;
+    let rest = rest.trim_start();
+
+    // Find the end of the path (whitespace, newline, or certain punctuation)
+    let end = rest
+        .find(|c: char| {
+            c.is_whitespace()
+                || c == '\n'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == ')'
+                || c == ']'
+                || c == ','
+        })
+        .unwrap_or(rest.len());
+
+    let path_str = rest.get(..end)?.trim_end_matches(['/', ':', ']', ')']);
+
+    if !path_str.starts_with('/') || path_str.len() <= 5 {
+        return None;
+    }
+
+    let path = PathBuf::from(path_str);
+
+    // If it looks like a file path (has extension), get the parent directory
+    // Also if it's deeper than /data/projects/X or /home/user/projects/X, truncate
+    let path = if path.extension().is_some() {
+        path.parent()?.to_path_buf()
+    } else {
+        path
+    };
+
+    // For /data/projects/X/... paths, return just /data/projects/X
+    let components: Vec<_> = path.components().collect();
+    if components.len() >= 4 {
+        let path_str = path.to_string_lossy();
+        if path_str.starts_with("/data/projects/") {
+            // Return just /data/projects/project_name
+            let parts: Vec<&str> = path_str.splitn(5, '/').collect();
+            if parts.len() >= 4 {
+                return Some(PathBuf::from(format!(
+                    "/{}/{}/{}",
+                    parts[1], parts[2], parts[3]
+                )));
+            }
+        }
+    }
+
+    Some(path)
+}
+
 pub struct GeminiConnector;
 impl Default for GeminiConnector {
     fn default() -> Self {
@@ -196,13 +294,15 @@ impl Connector for GeminiConnector {
                         .map(|s| s.chars().take(100).collect())
                 });
 
-            // Try to get workspace from parent directory structure
-            // Structure: ~/.gemini/tmp/<hash>/chats/session-*.json
-            // The <hash> directory might correspond to a project path
-            let workspace = file
-                .parent() // chats/
-                .and_then(|p| p.parent()) // <hash>/
-                .map(|p| p.to_path_buf());
+            // Try to extract actual workspace from message content first
+            // Gemini stores by hash, but messages often contain the real project path
+            let workspace = extract_workspace_from_content(&messages).or_else(|| {
+                // Fallback to parent directory structure
+                // Structure: ~/.gemini/tmp/<hash>/chats/session-*.json
+                file.parent() // chats/
+                    .and_then(|p| p.parent()) // <hash>/
+                    .map(|p| p.to_path_buf())
+            });
 
             convs.push(NormalizedConversation {
                 agent_slug: "gemini".into(),

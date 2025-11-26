@@ -157,6 +157,15 @@ flowchart LR
 - Automation guard: TUI only launches with explicit `cass tui`; in non-TTY contexts without a subcommand we emit guidance instead of spawning TUI.
 - stdout is data-only; stderr carries diagnostics/progress. Errors use JSON payload `{error:{code,kind,message,hint?,retryable}}`; exit codes: 0 ok; 2 usage; 3 missing index/db; 4 network; 5 data-corrupt; 6 incompatible-version; 7 lock/busy; 8 partial; 9 unknown.
 
+### Ready-to-paste blurb for AGENTS.md / CLAUDE.md
+> **cass (Coding Agent Session Search)** — CLI/TUI to search your local agent histories.  
+> - Use robot mode for machines: `cass --robot-help` (prints the automation contract) and `cass robot-docs <topic>` for focused docs.  
+> - Run searches with JSON output: `cass search "query" --robot [--limit N --offset N --agent codex --workspace /path]`.  
+> - Follow up on hits: `cass view <source_path> -n <line> --json` for structured snippets.  
+> - Index first if needed: `cass index --full` (or `cass index --watch` to tail changes).  
+> - stdout = data only; stderr = diagnostics/progress; exit codes are stable (see `--robot-help`).  
+> - In non-TTY automation, cass won’t start the TUI unless you explicitly run `cass tui`.
+
 ## 🔍 Connectors coverage
 - **Codex**: `~/.codex/sessions/**/rollout-*.jsonl`
 - **Cline**: VS Code globalStorage `saoudrizwan.claude-dev` task dirs

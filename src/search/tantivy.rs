@@ -1,12 +1,15 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, doc};
 
 use crate::connectors::NormalizedConversation;
 
-const SCHEMA_VERSION: &str = "v1";
+const SCHEMA_VERSION: &str = "v2";
+
+// Bump this when schema/tokenizer changes. Used to trigger rebuilds.
+pub const SCHEMA_HASH: &str = "tantivy-schema-v2-hyphen-normalize";
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -29,14 +32,44 @@ impl TantivyIndex {
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let schema = build_schema();
         std::fs::create_dir_all(path)?;
-        let index = if path.join("meta.json").exists() {
+
+        let meta_path = path.join("schema_hash.json");
+        let mut needs_rebuild = true;
+        if meta_path.exists() {
+            let meta = std::fs::read_to_string(&meta_path)?;
+            if meta.contains(SCHEMA_HASH) {
+                needs_rebuild = false;
+            }
+        }
+
+        if needs_rebuild {
+            // Recreate index directory completely to avoid stale lock files.
+            let _ = std::fs::remove_dir_all(path);
+            std::fs::create_dir_all(path)?;
+        }
+
+        // Remove any stale writer lock before opening/creating.
+        let lock_path = path.join(".tantivy-writer.lock");
+        if lock_path.exists() {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+
+        let mut index = if path.join("meta.json").exists() && !needs_rebuild {
             Index::open_in_dir(path)?
         } else {
             Index::create_in_dir(path, schema.clone())?
         };
+
+        ensure_tokenizer(&mut index);
+
+        std::fs::write(
+            &meta_path,
+            format!("{{\"schema_hash\":\"{}\"}}", SCHEMA_HASH),
+        )?;
+
         let writer = index
             .writer(50_000_000)
-            .with_context(|| "create index writer")?;
+            .map_err(|e| anyhow!("create index writer: {e:?}"))?;
         let fields = fields_from_schema(&schema)?;
         Ok(Self {
             index,
@@ -92,13 +125,21 @@ impl TantivyIndex {
 
 pub fn build_schema() -> Schema {
     let mut schema_builder = Schema::builder();
+    let text = TextOptions::default()
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("hyphen_normalize")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        )
+        .set_stored();
+
     schema_builder.add_text_field("agent", TEXT | STORED);
     schema_builder.add_text_field("workspace", STRING | STORED);
     schema_builder.add_text_field("source_path", STORED);
     schema_builder.add_u64_field("msg_idx", INDEXED | STORED);
     schema_builder.add_i64_field("created_at", INDEXED | STORED);
-    schema_builder.add_text_field("title", TEXT | STORED);
-    schema_builder.add_text_field("content", TEXT | STORED);
+    schema_builder.add_text_field("title", text.clone());
+    schema_builder.add_text_field("content", text);
     schema_builder.build()
 }
 
@@ -123,4 +164,13 @@ pub fn index_dir(base: &Path) -> Result<std::path::PathBuf> {
     let dir = base.join("index").join(SCHEMA_VERSION);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+pub fn ensure_tokenizer(index: &mut Index) {
+    use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
+    let analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(LowerCaser)
+        .filter(RemoveLongFilter::limit(40))
+        .build();
+    index.tokenizers().register("hyphen_normalize", analyzer);
 }

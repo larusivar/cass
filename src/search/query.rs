@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
@@ -38,9 +38,73 @@ pub struct SearchClient {
     sqlite: Option<Connection>,
 }
 
+fn sanitize_query(raw: &str) -> String {
+    // Replace characters that become boolean operators or column separators in Tantivy/FTS
+    // so hyphenated tokens (e.g., "cma-es") still match.
+    raw.replace(['-', '–', '—', '‐', '‑'], " ")
+}
+
+/// Check if content is primarily a tool invocation (noise that shouldn't appear in search results).
+/// Tool invocations like "[Tool: Bash - Check status]" are not informative search results.
+fn is_tool_invocation_noise(content: &str) -> bool {
+    let trimmed = content.trim();
+
+    // Direct tool invocations that are just "[Tool: X - description]"
+    if trimmed.starts_with("[Tool:") {
+        // If it's short or ends with ']', it's pure noise
+        if trimmed.len() < 100 || trimmed.ends_with(']') {
+            return true;
+        }
+    }
+
+    // Also filter very short content that's just tool names or markers
+    if trimmed.len() < 20 {
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("[tool") || lower.starts_with("tool:") {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Deduplicate search hits by content, keeping only the highest-scored hit for each unique content.
+/// This removes duplicate results when the same message appears multiple times (e.g., user repeated
+/// themselves in a conversation, or the same content was indexed from multiple sources).
+/// Also filters out tool invocation noise that isn't useful for search results.
+fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<SearchHit> = Vec::new();
+
+    for hit in hits {
+        // Skip tool invocation noise
+        if is_tool_invocation_noise(&hit.content) {
+            continue;
+        }
+
+        // Normalize content for comparison (trim whitespace, collapse multiple spaces)
+        let normalized = hit.content.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        if let Some(&existing_idx) = seen.get(&normalized) {
+            // If existing hit has lower score, replace it
+            if deduped[existing_idx].score < hit.score {
+                deduped[existing_idx] = hit;
+            }
+            // Otherwise keep existing (higher score)
+        } else {
+            seen.insert(normalized, deduped.len());
+            deduped.push(hit);
+        }
+    }
+
+    deduped
+}
+
 impl SearchClient {
     pub fn open(index_path: &Path, db_path: Option<&Path>) -> Result<Option<Self>> {
-        let tantivy = Index::open_in_dir(index_path).ok().and_then(|idx| {
+        let tantivy = Index::open_in_dir(index_path).ok().and_then(|mut idx| {
+            // Register custom tokenizer so searches work
+            crate::search::tantivy::ensure_tokenizer(&mut idx);
             let schema = idx.schema();
             let fields = fields_from_schema(&schema).ok()?;
             idx.reader().ok().map(|reader| (reader, fields))
@@ -65,26 +129,45 @@ impl SearchClient {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SearchHit>> {
-        if let Some((reader, fields)) = &self.reader {
-            tracing::info!(
-                backend = "tantivy",
-                query = query,
-                limit = limit,
-                offset = offset,
-                "search_start"
-            );
-            return self.search_tantivy(reader, fields, query, filters, limit, offset);
-        }
+        let sanitized = sanitize_query(query);
+
+        // Prefer SQLite FTS (correctness), then Tantivy (speed) if SQLite finds nothing.
+        // Request extra results to account for deduplication, then trim to requested limit.
+        let fetch_limit = limit * 3; // Fetch 3x to account for duplicates being removed
+
         if let Some(conn) = &self.sqlite {
             tracing::info!(
                 backend = "sqlite",
-                query = query,
+                query = sanitized,
                 limit = limit,
                 offset = offset,
                 "search_start"
             );
-            return self.search_sqlite(conn, query, filters, limit, offset);
+            let hits =
+                self.search_sqlite(conn, &sanitized, filters.clone(), fetch_limit, offset)?;
+            if !hits.is_empty() {
+                let mut deduped = deduplicate_hits(hits);
+                deduped.truncate(limit);
+                return Ok(deduped);
+            }
+            tracing::warn!(backend = "sqlite", query = sanitized, "no_sqlite_hits");
         }
+
+        if let Some((reader, fields)) = &self.reader {
+            tracing::info!(
+                backend = "tantivy",
+                query = sanitized,
+                limit = limit,
+                offset = offset,
+                "search_start"
+            );
+            let hits =
+                self.search_tantivy(reader, fields, &sanitized, filters, fetch_limit, offset)?;
+            let mut deduped = deduplicate_hits(hits);
+            deduped.truncate(limit);
+            return Ok(deduped);
+        }
+
         tracing::info!(backend = "none", query = query, "search_start");
         Ok(Vec::new())
     }
@@ -222,8 +305,15 @@ impl SearchClient {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SearchHit>> {
+        // FTS5 cannot handle empty queries
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         let mut sql = String::from(
-            "SELECT title, content, agent, workspace, source_path, created_at, bm25(fts_messages) AS score, snippet(fts_messages, 0, '**', '**', '...', 64) AS snippet\n             FROM fts_messages WHERE fts_messages MATCH ?",
+            "SELECT f.title, f.content, f.agent, f.workspace, f.source_path, f.created_at, bm25(fts_messages) AS score, snippet(fts_messages, 0, '**', '**', '...', 64) AS snippet, m.idx
+             FROM fts_messages f
+             LEFT JOIN messages m ON f.message_id = m.id
+             WHERE fts_messages MATCH ?",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
 
@@ -232,7 +322,7 @@ impl SearchClient {
                 .map(|_| "?".to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            sql.push_str(&format!(" AND agent IN ({placeholders})"));
+            sql.push_str(&format!(" AND f.agent IN ({placeholders})"));
             for a in filters.agents {
                 params.push(Box::new(a));
             }
@@ -243,18 +333,18 @@ impl SearchClient {
                 .map(|_| "?".to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            sql.push_str(&format!(" AND workspace IN ({placeholders})"));
+            sql.push_str(&format!(" AND f.workspace IN ({placeholders})"));
             for w in filters.workspaces {
                 params.push(Box::new(w));
             }
         }
 
         if filters.created_from.is_some() {
-            sql.push_str(" AND created_at >= ?");
+            sql.push_str(" AND f.created_at >= ?");
             params.push(Box::new(filters.created_from.unwrap()));
         }
         if filters.created_to.is_some() {
-            sql.push_str(" AND created_at <= ?");
+            sql.push_str(" AND f.created_at <= ?");
             params.push(Box::new(filters.created_to.unwrap()));
         }
 
@@ -274,6 +364,9 @@ impl SearchClient {
                 let created_at: Option<i64> = row.get(5).ok();
                 let score: f32 = row.get::<_, f64>(6)? as f32;
                 let snippet: String = row.get(7)?;
+                // idx is 0-indexed message index; convert to 1-indexed line number for JSONL files
+                let idx: Option<i64> = row.get(8).ok();
+                let line_number = idx.map(|i| (i + 1) as usize);
                 Ok(SearchHit {
                     title,
                     snippet,
@@ -283,7 +376,7 @@ impl SearchClient {
                     agent,
                     workspace,
                     created_at,
-                    line_number: None, // TODO: populate from sqlite if stored
+                    line_number,
                 })
             },
         )?;
@@ -455,6 +548,45 @@ mod tests {
         let client = SearchClient::open(dir.path(), None)?.expect("index present");
         let hits = client.search("pagination", SearchFilters::default(), 1, 1)?;
         assert_eq!(hits.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn search_matches_hyphenated_term() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("cma-es notes".into()),
+            workspace: Some(std::path::PathBuf::from("/tmp/workspace")),
+            source_path: dir.path().join("rollout-1.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: Some("me".into()),
+                created_at: Some(1_700_000_000_000),
+                content: "Need CMA-ES strategy and CMA ES variants".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![NormalizedSnippet {
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                    language: None,
+                    snippet_text: None,
+                }],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+        let hits = client.search("cma-es", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.to_lowercase().contains("cma"));
         Ok(())
     }
 }

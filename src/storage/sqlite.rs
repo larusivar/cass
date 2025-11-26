@@ -576,8 +576,8 @@ fn insert_fts_message(
     conv: &Conversation,
 ) -> Result<()> {
     let _ = tx.execute(
-        "INSERT INTO fts_messages(content, title, agent, workspace, source_path, message_id)
-         VALUES(?,?,?,?,?,?)",
+        "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+         VALUES(?,?,?,?,?,?,?)",
         params![
             msg.content,
             conv.title.clone().unwrap_or_default(),
@@ -587,6 +587,7 @@ fn insert_fts_message(
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             path_to_string(&conv.source_path),
+            msg.created_at.or(conv.started_at),
             message_id
         ],
     );

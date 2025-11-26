@@ -78,6 +78,7 @@ impl Connector for OpenCodeConnector {
         let mut convs = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
 
+        // Use ctx.data_root for tests/custom paths, but filter out CASS internal databases
         let dbs = if ctx.data_root.exists() {
             WalkDir::new(&ctx.data_root)
                 .into_iter()
@@ -86,6 +87,10 @@ impl Connector for OpenCodeConnector {
                 .map(|e| e.path().to_path_buf())
                 .filter(|p| {
                     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    // Exclude CASS's own internal databases to prevent self-indexing
+                    if name == "agent_search.db" || name == "conversations.db" {
+                        return false;
+                    }
                     name.ends_with(".db") || name.ends_with(".sqlite")
                 })
                 .collect()

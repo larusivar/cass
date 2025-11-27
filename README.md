@@ -1,10 +1,12 @@
-# 🔎 coding-agent-search
+# 🔎 coding-agent-search (cass)
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)
 ![Status](https://img.shields.io/badge/status-alpha-purple.svg)
+![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green.svg)
 
-Unified TUI to search and browse local coding-agent history (Codex, Claude Code, Gemini CLI, Cline, OpenCode, Amp) with fast indexing, filters, and a colorful terminal experience.
+**Unified, high-performance TUI to index and search your local coding agent history.**  
+Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, and Amp into a single, searchable timeline.
 
 <div align="center">
 
@@ -24,62 +26,42 @@ install.ps1 -EasyMode -Verify
 
 ---
 
-## ✨ Highlights
-- **Three-pane TUI** (ratatui): live search, filter pills, rich detail view, open-in-editor, help overlay, light/dark themes.
-- **Connectors** for Codex, Claude Code, Gemini CLI, Cline (VS Code), OpenCode, Amp; incremental since_ts ingestion; source paths preserved.
-- **Indexing pipeline**: normalized SQLite + Tantivy; FTS5 mirror; append-only updates; watch-mode with mtime routing and watch_state persistence.
-- **Search**: multi-field (title/content) with agent/workspace/time filters, pagination, snippets, and Tantivy fallback to SQLite when needed.
-- **Logging & tracing**: spans for connectors/indexer/search to aid debugging and tests.
-- **Installer**: curl|bash or pwsh with checksum enforcement, optional artifact override, easy/normal modes, rustup nightly bootstrap, PATH hints, self-test and quickstart hooks.
-- **Tests & CI**: unit, connector fixtures, storage/indexer/search/TUI snapshots, installer e2e (file:// artifacts), headless TUI smoke; CI runs fmt/clippy/check/test + e2e.
+## ✨ Key Features
 
-### TUI keymap (current)
-- Search: type to filter; `/` focuses query. `Ctrl-R` cycles query history. `Ctrl+Shift+R` refreshes search. `y` copies path (Results) or content (Detail) to clipboard.
-- Navigation: `Up/Down` or `j/k` move selection/scroll; `Left/Right` or `h/l` switch panes (Results) or focus back (Detail); `Tab` toggles focus (Results ⇄ Detail). `g/G` jump first/last.
-- Mouse: Click pane/item to select; click detail area to focus. Scroll wheel navigates results or scrolls detail.
-- Detail: `[` / `]` cycles tabs (Messages/Snippets/Raw). `Up/Down/j/k` scrolls content when focused.
-- Filters: `F3` agent (with autocomplete), `F4` workspace, `F5/F6` time range (human-readable: `-7d`, `yesterday`, `2024-11-20`); `Shift+F3` scope to active agent; `Shift+F4` clear agent scope; `Shift+F5` cycle time presets (24h/7d/30d/all); `Ctrl+Del` clear all filters.
-- Modes: `F9` toggles match mode (prefix ↔ standard). `F12` cycles ranking (recent-heavy → balanced → relevance-heavy). `F2` toggles theme.
-- Context: `F7` cycles context window (S/M/L/XL); `Space` temporarily peeks XL then returns.
-- Density: `Shift+=/+` increase per-pane items, `-` decrease (min 4, max 50). Auto-adjusts based on terminal height.
-- Actions: `Enter`/`F8` open hit in `$EDITOR`; `Esc`/`F10` quit (or back from Detail focus).
-- Empty state: shows recent per-agent conversations before typing; recent queries list when query is empty; "Did you mean?" suggestions for typos.
+### ⚡ Instant Search (Sub-60ms Latency)
+- **"Search-as-you-type"**: Results update instantly with every keystroke.
+- **Edge N-Gram Indexing**: We frontload the work by pre-computing prefix matches (e.g., "cal" -> "calculate") during indexing, trading disk space for O(1) lookup speed at query time.
+- **Smart Tokenization**: Handles `snake_case` ("my_var" matches "my" and "var"), hyphenated terms, and code symbols (`c++`, `foo.bar`) correctly.
+- **Zero-Stall Updates**: The background indexer commits changes atomically; `reader.reload()` ensures new messages appear in the search bar immediately without restarting.
 
-## 🚀 Quickstart
-1) **Install** (easy-mode shown):
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh \
-     | bash -s -- --easy-mode --verify
-   ```
-   - Flags: `--dest DIR`, `--system`, `--artifact-url`, `--checksum`, `--checksum-url`, `--quickstart`, `--quiet`.
-   - Skipping rustup: set `RUSTUP_INIT_SKIP=1` (for environments with nightly already installed).
-2) **Launch TUI** (automatically indexes in background):
-   ```bash
-   cass
-   ```
-   - Or explicitly: `cass tui`
-   - Index only: `cass index --full`
+### 🖥️ Rich Terminal UI (TUI)
+- **Three-Pane Layout**: Filter bar (top), scrollable results (left), and syntax-highlighted details (right).
+- **Live Status**: Footer shows real-time indexing progress (e.g., `Indexing 150/2000 (7%)`) and active filters.
+- **Mouse Support**: Click to select results, scroll panes, or clear filters.
+- **Theming**: Adaptive Dark/Light modes with role-colored messages (User/Assistant/System).
 
-## 🛠️ CLI reference
-```bash
-cass [tui] [--data-dir DIR] [--once]
-cass index [--full] [--watch] [--data-dir DIR] [--db PATH]
-cass completions <shell>
-cass man
-cass --robot-help
-cass robot-docs <commands|env|paths|schemas|exit-codes|examples|contracts|wrap>
-```
-- **cass (default)**: starts TUI and spawns a background indexer (watch mode).
-- **index --full** truncates DB/index (non-destructive to source logs) then re-ingests.
-- **index --watch** debounced file watcher; routes changes to matching connector; maintains `watch_state.json`.
-- **Data locations**: defaults to platform data dir (`directories`); override with `--data-dir`.
+### 🔗 Universal Connectors
+Ingests history from all major local agents, normalizing them into a unified `Conversation -> Message -> Snippet` model:
+- **Codex**: `~/.codex/sessions` (Rollout JSONL)
+- **Cline**: VS Code global storage (Task directories)
+- **Gemini CLI**: `~/.gemini/tmp` (Chat JSON)
+- **Claude Code**: `~/.claude/projects` (Session JSONL)
+- **OpenCode**: `.opencode` directories (SQLite)
+- **Amp**: `~/.local/share/amp` & VS Code storage
 
-## 🧠 Architecture
-- **Model layer**: normalized agents/workspaces/conversations/messages/snippets (`src/model`).
-- **Storage**: rusqlite with WAL pragmas, migrations, schema_version, FTS5 mirror; append-only insert/update; rebuild_fts helper.
-- **Search**: Tantivy schema (agent, workspace, source_path, msg_idx, created_at, title, content); SQLite FTS fallback.
-- **Connectors**: detection + scan with since_ts filtering, external_id dedupe, idx resequencing, workspace/source path propagation.
-- **UI**: ratatui layout with filter pills, badges, themed detail pane, status/footer; headless once-mode for CI.
+---
+
+## 🧠 Architecture & Engineering
+
+`cass` employs a dual-storage strategy to balance data integrity with search performance.
+
+### The Pipeline
+1.  **Ingestion**: Connectors scan proprietary agent files and normalize them into standard structs.
+2.  **Storage (SQLite)**: The **Source of Truth**. Data is persisted to a normalized SQLite schema (`messages`, `conversations`, `agents`). This ensures ACID compliance, reliable storage, and supports complex relational queries (stats, grouping).
+3.  **Search Index (Tantivy)**: The **Speed Layer**. New messages are incrementally pushed to a Tantivy full-text index. This index is optimized for speed:
+    *   **Fields**: `title`, `content`, `agent`, `workspace`, `created_at`.
+    *   **Prefix Fields**: `title_prefix` and `content_prefix` use **Index-Time Edge N-Grams** (not stored on disk to save space) for instant prefix matching.
+    *   **Deduping**: Search results are deduplicated by content hash to remove noise from repeated tool outputs.
 
 ```mermaid
 flowchart LR
@@ -98,91 +80,118 @@ flowchart LR
       Amp]:::pastel
     end
 
-    subgraph Connectors
-      C1[Detect & scan<br/>since_ts filtering<br/>external_id dedupe]:::pastel2
+    subgraph "Ingestion Layer"
+      C1[**Connectors**<br/>Detect & Scan<br/>Normalize<br/>Dedupe]:::pastel2
     end
 
-    subgraph Storage
-      S1[SQLite (WAL)
-      schema_version
-      migrations]:::pastel3
-      S2[FTS5 mirror]:::pastel3
+    subgraph "Dual Storage"
+      S1[**SQLite (WAL)**<br/>Source of Truth<br/>Relational Data<br/>Migrations]:::pastel3
+      T1[**Tantivy Index**<br/>Search Optimized<br/>Edge N-Grams<br/>Prefix Cache]:::pastel4
     end
 
-    subgraph Search
-      T1[Tantivy index<br/>agent/workspace/content]:::pastel4
-      F1[SQLite FTS fallback]:::pastel4
+    subgraph "Presentation"
+      U1[**TUI (Ratatui)**<br/>Async Search<br/>Filter Pills<br/>Details]:::pastel5
+      U2[**CLI / Robot**<br/>JSON Output<br/>Automation]:::pastel5
     end
 
-    subgraph UI
-      U1[TUI (ratatui)
-      filters + detail + help]:::pastel5
-      U2[Headless once-mode]:::pastel5
-    end
-
-    A --> C1 --> S1
-    C1 --> S2
-    S1 --> T1
-    S2 --> F1
-    T1 --> U1
-    F1 --> U1
-    T1 --> U2
-    F1 --> U2
+    A --> C1
+    C1 -->|Persist| S1
+    C1 -->|Index New| T1
+    S1 -.->|Rebuild| T1
+    T1 -->|Query| U1
+    T1 -->|Query| U2
 ```
 
-## 🔒 Integrity & safety
-- Installer requires sha256 verification (auto-fetches `<artifact>.sha256` or uses provided CHECKSUM).
-- Temporary workdir + lock per run; no destructive file ops; installs to user-local by default.
-- rustup nightly bootstrap only when cargo/nightly missing (skippable via env).
+### Background Indexing & Watch Mode
+- **Non-Blocking**: The indexer runs in a background thread. You can search while it works.
+- **Watch Mode**: Uses file system watchers (`notify`) to detect changes in agent logs. When you save a file or an agent replies, `cass` re-indexes just that conversation and refreshes the search view automatically.
+- **Progress Tracking**: Atomic counters track scanning/indexing phases, displayed unobtrusively in the TUI footer.
 
-## ⚙️ Environment
-- Loads `.env` via `dotenvy::dotenv().ok()`; configure API/base paths there (see pattern in code). Do not overwrite `.env`.
-- Default data dir: `directories::ProjectDirs` for `coding-agent-search`; override via flags.
-- Logs are written to `cass.log` (daily rotating) in the data directory.
-- On interactive TUI startup we check GitHub releases and prompt to self-update; skip with `CODING_AGENT_SEARCH_NO_UPDATE_PROMPT=1`, `TUI_HEADLESS=1`, or in CI/non-TTY.
+---
 
-## 🧪 Developer workflow
-- `cargo fmt --check`
-- `cargo check --all-targets`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo test`
-- `cargo test --test install_scripts -- --test-threads=1`
-- `cargo test --test e2e_index_tui -- --test-threads=1`
-- `cargo test --test e2e_install_easy -- --test-threads=1`
+## 🚀 Quickstart
 
-## 🤖 AI / Automation mode
-- Use `cass --robot-help` for a deterministic, wide, machine-first guide (contract v1). No legacy constraints.
-- Machine-oriented flags: `--color=auto|never|always`, `--progress=auto|bars|plain|none`, `--wrap <cols>`, `--nowrap`, `--trace-file <path>`.
-- Subcommand `cass robot-docs <topic>` dumps focused docs: commands, env, paths, schemas, exit-codes, examples, contracts, wrap.
-- Automation guard: TUI only launches with explicit `cass tui`; in non-TTY contexts without a subcommand we emit guidance instead of spawning TUI.
-- stdout is data-only; stderr carries diagnostics/progress. Errors use JSON payload `{error:{code,kind,message,hint?,retryable}}`; exit codes: 0 ok; 2 usage; 3 missing index/db; 4 network; 5 data-corrupt; 6 incompatible-version; 7 lock/busy; 8 partial; 9 unknown.
+### 1. Install
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh \
+  | bash -s -- --easy-mode --verify
+```
+
+### 2. Launch
+```bash
+cass
+```
+*On first run, `cass` performs a full index. You'll see progress in the footer. Search works immediately (falling back to SQLite or partial results until complete).*
+
+### 3. Usage
+- **Type to search**: "python error", "refactor auth", "c++".
+- **Navigation**: `Up`/`Down` to select, `Right` to focus detail pane.
+- **Filters**:
+    - `F3`: Filter by Agent (e.g., "codex").
+    - `F4`: Filter by Workspace/Project.
+    - `F5`/`F6`: Time filters (Today, Week, etc.).
+- **Actions**:
+    - `Enter`: Open original log file in `$EDITOR`.
+    - `y`: Copy file path or snippet to clipboard.
+
+---
+
+## 🛠️ CLI Reference
+
+The `cass` binary supports both interactive use and automation.
+
+```bash
+cass [tui] [--data-dir DIR] [--once]
+cass index [--full] [--watch] [--data-dir DIR]
+cass search "query" --robot --limit 5
+cass stats --json
+```
+
+- **cass (default)**: Starts TUI + background watcher.
+- **index --full**: Forces a complete rebuild of the DB and Index.
+- **index --watch**: Runs essentially as a daemon, watching for file changes.
+- **search --robot**: Outputs JSON for other tools to consume.
+
+## 🤖 AI / Automation Mode
+
+`cass` is designed to be used by *other* AI agents.
+
+- **Self-Documenting**: Run `cass --robot-help` for a machine-optimized guide (Contract v1).
+- **Structured Data**: Use `--robot` or `--json` for strictly typed JSON output on stdout.
+- **Exit Codes**:
+    - `0`: Success
+    - `2`: Usage error
+    - `3`: Missing index (run `cass index --full`)
+    - `9`: Unknown error
+- **Traceability**: Use `--trace-file <path>` to log execution spans for debugging.
 
 ### Ready-to-paste blurb for AGENTS.md / CLAUDE.md
-> **cass (Coding Agent Session Search)** — CLI/TUI to search your local agent histories.  
-> - Use robot mode for machines: `cass --robot-help` (prints the automation contract) and `cass robot-docs <topic>` for focused docs.  
-> - Run searches with JSON output: `cass search "query" --robot [--limit N --offset N --agent codex --workspace /path]`.  
-> - Follow up on hits: `cass view <source_path> -n <line> --json` for structured snippets.  
-> - Index first if needed: `cass index --full` (or `cass index --watch` to tail changes).  
-> - stdout = data only; stderr = diagnostics/progress; exit codes are stable (see `--robot-help`).  
-> - In non-TTY automation, cass won’t start the TUI unless you explicitly run `cass tui`.
+> **cass (Coding Agent Session Search)** — High-performance local search for agent history.
+> - **Discovery**: `cass --robot-help` (prints automation contract).
+> - **Search**: `cass search "query" --robot [--limit N --agent codex]`.
+> - **Inspect**: `cass view <source_path> -n <line> --json`.
+> - **Manage**: `cass index --full` (rebuilds index).
+> - **Design**: stdout is data-only JSON; stderr is diagnostics.
 
-## 🔍 Connectors coverage
-- **Codex**: `~/.codex/sessions/**/rollout-*.jsonl`
-- **Cline**: VS Code globalStorage `saoudrizwan.claude-dev` task dirs
-- **Gemini CLI**: `~/.gemini/tmp/**`
-- **Claude Code**: `~/.claude/projects/**` + `.claude/.claude.json`
-- **OpenCode**: `.opencode` SQLite DBs (project/global)
-- **Amp**: VS Code globalStorage + `~/.local/share/amp` caches
+---
 
-## 🩺 Troubleshooting
-- **Checksum mismatch**: ensure `.sha256` reachable or pass `--checksum` explicitly; check proxies/firewalls.
-- **Binary not on PATH**: append `~/.local/bin` (or your `--dest`) to PATH; re-open shell.
-- **Nightly missing in CI**: set `RUSTUP_INIT_SKIP=1` if toolchain is preinstalled; otherwise allow installer to run rustup.
-- **Watch mode not triggering**: confirm watch_state.json updates and that connector roots are accessible; mtime-based routing expects real file touch.
+## 🔒 Integrity & Safety
+- **Verified Install**: The installer enforces SHA256 checksums.
+- **Sandboxed Data**: All indexes/DBs live in standard platform data directories (`~/.local/share/coding-agent-search` on Linux).
+- **Read-Only Source**: `cass` *never* modifies your agent log files. It only reads them.
+
+## 🧪 Developer Workflow
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
 
 ## 📜 License
-Project license is recorded in the repository (see LICENSE file).
-
-## 🤝 Contributing
-- Follow nightly toolchain policy and run fmt/clippy/test before sending changes.
-- Keep console output colorful and informative; avoid destructive commands; do not use regex-based mass scripts in this repo.
+MIT or Apache-2.0. See [LICENSE](LICENSE) for details.

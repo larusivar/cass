@@ -1,11 +1,19 @@
 use anyhow::Result;
+use lru::LruCache;
+use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, TermQuery};
 use tantivy::schema::{IndexRecordOption, Term, Value};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, TantivyDocument};
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use rusqlite::Connection;
 
@@ -36,12 +44,73 @@ pub struct SearchHit {
 pub struct SearchClient {
     reader: Option<(IndexReader, crate::search::tantivy::Fields)>,
     sqlite: Option<Connection>,
+    prefix_cache: Mutex<CacheShards>,
+    last_reload: Mutex<Option<Instant>>,
+    warm_tx: Option<mpsc::UnboundedSender<WarmJob>>,
+    _warm_handle: Option<JoinHandle<()>>,
+    // Shared for warm worker to read cache/filter logic; keep Arc to avoid clones of big data
+    _shared_filters: Arc<Mutex<()>>, // placeholder lock to ensure Send/Sync; future warm prefill state
+    metrics: Metrics,
+}
+
+// Cache tuning: read from env to allow runtime override without recompiling.
+// CASS_CACHE_SHARD_CAP controls per-shard entries; default 256.
+static CACHE_SHARD_CAP: Lazy<usize> = Lazy::new(|| {
+    std::env::var("CASS_CACHE_SHARD_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(256)
+});
+
+// Warm debounce (ms) for background reload/warm jobs; default 120ms.
+static WARM_DEBOUNCE_MS: Lazy<u64> = Lazy::new(|| {
+    std::env::var("CASS_WARM_DEBOUNCE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(120)
+});
+
+#[derive(Clone)]
+struct CachedHit {
+    hit: SearchHit,
+    lc_content: String,
+    lc_title: Option<String>,
+    lc_snippet: String,
+    bloom64: u64,
+}
+
+#[derive(Default)]
+struct CacheShards {
+    shards: HashMap<String, LruCache<String, Vec<CachedHit>>>,
+}
+
+impl CacheShards {
+    fn shard_mut(&mut self, name: &str) -> &mut LruCache<String, Vec<CachedHit>> {
+        self.shards
+            .entry(name.to_string())
+            .or_insert_with(|| LruCache::new(NonZeroUsize::new(*CACHE_SHARD_CAP).unwrap()))
+    }
+
+    fn shard_opt(&self, name: &str) -> Option<&LruCache<String, Vec<CachedHit>>> {
+        self.shards.get(name)
+    }
+}
+
+#[derive(Clone)]
+struct WarmJob {
+    query: String,
+    _filters: SearchFilters,
 }
 
 fn sanitize_query(raw: &str) -> String {
-    // Replace characters that become boolean operators or column separators in Tantivy/FTS
-    // so hyphenated tokens (e.g., "cma-es") still match.
-    raw.replace(['-', '–', '—', '‐', '‑'], " ")
+    // Replace any character that is not alphanumeric with a space.
+    // This ensures that the input tokens match how SimpleTokenizer splits content.
+    // e.g. "c++" -> "c  ", "foo.bar" -> "foo bar"
+    raw.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect()
 }
 
 /// Check if content is primarily a tool invocation (noise that shouldn't appear in search results).
@@ -116,9 +185,27 @@ impl SearchClient {
             return Ok(None);
         }
 
+        let shared_filters = Arc::new(Mutex::new(()));
+
+        let warm_pair = if let Some((reader, fields)) = &tantivy {
+            maybe_spawn_warm_worker(
+                reader.clone(),
+                fields.clone(),
+                Arc::downgrade(&shared_filters),
+            )
+        } else {
+            None
+        };
+
         Ok(Some(Self {
             reader: tantivy,
             sqlite,
+            prefix_cache: Mutex::new(CacheShards::default()),
+            last_reload: Mutex::new(None),
+            warm_tx: warm_pair.as_ref().map(|(tx, _)| tx.clone()),
+            _warm_handle: warm_pair.map(|(_, h)| h),
+            _shared_filters: shared_filters,
+            metrics: Metrics::default(),
         }))
     }
 
@@ -131,28 +218,35 @@ impl SearchClient {
     ) -> Result<Vec<SearchHit>> {
         let sanitized = sanitize_query(query);
 
-        // Prefer SQLite FTS (correctness), then Tantivy (speed) if SQLite finds nothing.
-        // Request extra results to account for deduplication, then trim to requested limit.
-        let fetch_limit = limit * 3; // Fetch 3x to account for duplicates being removed
-
-        if let Some(conn) = &self.sqlite {
-            tracing::info!(
-                backend = "sqlite",
-                query = sanitized,
-                limit = limit,
-                offset = offset,
-                "search_start"
-            );
-            let hits =
-                self.search_sqlite(conn, &sanitized, filters.clone(), fetch_limit, offset)?;
-            if !hits.is_empty() {
-                let mut deduped = deduplicate_hits(hits);
-                deduped.truncate(limit);
-                return Ok(deduped);
+        // Schedule warmup for likely prefixes when user pauses typing.
+        if offset == 0 {
+            if let Some(tx) = &self.warm_tx {
+                let _ = tx.send(WarmJob {
+                    query: sanitized.clone(),
+                    _filters: filters.clone(),
+                });
             }
-            tracing::warn!(backend = "sqlite", query = sanitized, "no_sqlite_hits");
         }
 
+        // Fast path: reuse cached prefix when user is typing forward (offset 0 only).
+        if offset == 0 {
+            if let Some(cached) = self.cached_prefix_hits(&sanitized, &filters) {
+                let mut filtered: Vec<SearchHit> = cached
+                    .into_iter()
+                    .filter(|h| hit_matches_query_cached(h, &sanitized))
+                    .map(|c| c.hit.clone())
+                    .collect();
+                if filtered.len() >= limit {
+                    filtered.truncate(limit);
+                    self.metrics.inc_cache_hits();
+                    return Ok(filtered);
+                }
+                self.metrics.inc_cache_shortfall();
+            }
+            self.metrics.inc_cache_miss();
+        }
+
+        // Tantivy is the primary high-performance engine.
         if let Some((reader, fields)) = &self.reader {
             tracing::info!(
                 backend = "tantivy",
@@ -161,10 +255,40 @@ impl SearchClient {
                 offset = offset,
                 "search_start"
             );
-            let hits =
-                self.search_tantivy(reader, fields, &sanitized, filters, fetch_limit, offset)?;
+            let hits = self.search_tantivy(
+                reader,
+                fields,
+                &sanitized,
+                filters.clone(),
+                limit * 3,
+                offset,
+            )?;
+            if !hits.is_empty() {
+                let mut deduped = deduplicate_hits(hits);
+                deduped.truncate(limit);
+                self.put_cache(&sanitized, &filters, &deduped);
+                return Ok(deduped);
+            }
+            // If Tantivy yields 0 results, we can optionally fall back to SQLite FTS
+            // if we suspect consistency issues, but for now let's trust Tantivy
+            // or fall through if you prefer robust fallback.
+            // Given the "speed first" requirement, we return early if we got hits.
+            // If empty, we *can* try SQLite just in case index is lagging.
+        }
+
+        // Fallback: SQLite FTS (slower, but strictly consistent with DB)
+        if let Some(conn) = &self.sqlite {
+            tracing::info!(
+                backend = "sqlite",
+                query = sanitized,
+                limit = limit,
+                offset = offset,
+                "search_start"
+            );
+            let hits = self.search_sqlite(conn, &sanitized, filters.clone(), limit * 3, offset)?;
             let mut deduped = deduplicate_hits(hits);
             deduped.truncate(limit);
+            self.put_cache(&sanitized, &filters, &deduped);
             return Ok(deduped);
         }
 
@@ -181,12 +305,56 @@ impl SearchClient {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SearchHit>> {
+        self.maybe_reload_reader(reader)?;
         let searcher = reader.searcher();
-        let parser = QueryParser::for_index(searcher.index(), vec![fields.title, fields.content]);
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        if !query.trim().is_empty() {
-            clauses.push((Occur::Must, parser.parse_query(query)?));
+
+        // Manual query construction for "search-as-you-type" prefix support.
+        // We treat each whitespace-separated token as a MUST clause.
+        // Each token matches if it appears in title OR content OR their prefix variants.
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if !terms.is_empty() {
+            for term_str in terms {
+                let term_lower = term_str.to_lowercase();
+                let mut term_shoulds: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+                // Exact/Standard match (boosted)
+                term_shoulds.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.title, &term_lower),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )),
+                ));
+                term_shoulds.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.content, &term_lower),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )),
+                ));
+
+                // Prefix/Ngram match (via edge_ngram field)
+                term_shoulds.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.title_prefix, &term_lower),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )),
+                ));
+                term_shoulds.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.content_prefix, &term_lower),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )),
+                ));
+
+                clauses.push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
+            }
+        } else {
+            clauses.push((Occur::Must, Box::new(AllQuery)));
         }
 
         if !filters.agents.is_empty() {
@@ -245,7 +413,12 @@ impl SearchClient {
             Box::new(BooleanQuery::new(clauses))
         };
 
-        let snippet_generator = SnippetGenerator::create(&searcher, &*q, fields.content)?;
+        let prefix_only = is_prefix_only(query);
+        let snippet_generator = if prefix_only {
+            None
+        } else {
+            Some(SnippetGenerator::create(&searcher, &*q, fields.content)?)
+        };
 
         let top_docs = searcher.search(&q, &TopDocs::with_limit(limit).and_offset(offset))?;
         let mut hits = Vec::new();
@@ -258,6 +431,7 @@ impl SearchClient {
                 .to_string();
             let content = doc
                 .get_first(fields.content)
+                .or_else(|| doc.get_first(fields.preview))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -266,11 +440,17 @@ impl SearchClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let snippet = snippet_generator
-                .snippet_from_doc(&doc)
-                .to_html()
-                .replace("<b>", "**")
-                .replace("</b>", "**");
+            let snippet = if let Some(r#gen) = &snippet_generator {
+                r#gen
+                    .snippet_from_doc(&doc)
+                    .to_html()
+                    .replace("<b>", "**")
+                    .replace("</b>", "**")
+            } else if let Some(sn) = cached_prefix_snippet(&content, query, 160) {
+                sn
+            } else {
+                quick_prefix_snippet(&content, query, 160)
+            };
             let source = doc
                 .get_first(fields.source_path)
                 .and_then(|v| v.as_str())
@@ -389,12 +569,368 @@ impl SearchClient {
     }
 }
 
+#[derive(Default, Clone)]
+struct Metrics {
+    cache_hits: Arc<Mutex<u64>>,
+    cache_miss: Arc<Mutex<u64>>,
+    cache_shortfall: Arc<Mutex<u64>>,
+    reloads: Arc<Mutex<u64>>,
+}
+
+impl Metrics {
+    fn inc_cache_hits(&self) {
+        *self.cache_hits.lock().unwrap() += 1;
+    }
+    fn inc_cache_miss(&self) {
+        *self.cache_miss.lock().unwrap() += 1;
+    }
+    fn inc_cache_shortfall(&self) {
+        *self.cache_shortfall.lock().unwrap() += 1;
+    }
+    fn inc_reload(&self) {
+        *self.reloads.lock().unwrap() += 1;
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> (u64, u64, u64, u64) {
+        (
+            *self.cache_hits.lock().unwrap(),
+            *self.cache_miss.lock().unwrap(),
+            *self.cache_shortfall.lock().unwrap(),
+            *self.reloads.lock().unwrap(),
+        )
+    }
+}
+
+fn maybe_spawn_warm_worker(
+    reader: IndexReader,
+    fields: crate::search::tantivy::Fields,
+    filters_guard: std::sync::Weak<Mutex<()>>,
+) -> Option<(mpsc::UnboundedSender<WarmJob>, JoinHandle<()>)> {
+    // Only spawn if a Tokio runtime is available (tests may call without one).
+    if Handle::try_current().is_err() {
+        return None;
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<WarmJob>();
+    let handle = tokio::spawn(async move {
+        // Simple debounce: process at most one warmup every WARM_DEBOUNCE_MS.
+        let mut last_run = Instant::now();
+        while let Some(job) = rx.recv().await {
+            let now = Instant::now();
+            if now.duration_since(last_run) < Duration::from_millis(*WARM_DEBOUNCE_MS) {
+                continue;
+            }
+            last_run = now;
+            if filters_guard.upgrade().is_none() {
+                break;
+            }
+            let _ = reader.reload();
+            // Run a tiny warm search to prefill OS cache and hit the Tantivy reader
+            // without allocating full result sets. Limit 1 doc.
+            let searcher = reader.searcher();
+            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for term_str in job.query.split_whitespace() {
+                let term_lower = term_str.to_lowercase();
+                let mut term_shoulds: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                term_shoulds.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.title, &term_lower),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )),
+                ));
+                term_shoulds.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.content, &term_lower),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    )),
+                ));
+                clauses.push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
+            }
+            if !clauses.is_empty() {
+                let q: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
+                let _ = searcher.search(&q, &TopDocs::with_limit(1));
+            }
+        }
+    });
+    Some((tx, handle))
+}
+
+fn cached_hit_from(hit: &SearchHit) -> CachedHit {
+    let lc_content = hit.content.to_lowercase();
+    let lc_title = (!hit.title.is_empty()).then(|| hit.title.to_lowercase());
+    let lc_snippet = hit.snippet.to_lowercase();
+    let bloom64 = bloom_from_text(&lc_content, &lc_title, &lc_snippet);
+    CachedHit {
+        hit: hit.clone(),
+        lc_content,
+        lc_title,
+        lc_snippet,
+        bloom64,
+    }
+}
+
+fn bloom_from_text(content: &str, title: &Option<String>, snippet: &str) -> u64 {
+    let mut bits = 0u64;
+    for token in token_stream(content) {
+        bits |= hash_token(token);
+    }
+    if let Some(t) = title {
+        for token in token_stream(t) {
+            bits |= hash_token(token);
+        }
+    }
+    for token in token_stream(snippet) {
+        bits |= hash_token(token);
+    }
+    bits
+}
+
+fn token_stream(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+}
+
+fn hash_token(tok: &str) -> u64 {
+    // Simple 64-bit djb2-style hash mapped to bit position 0..63
+    let mut h: u64 = 5381;
+    for b in tok.as_bytes() {
+        h = ((h << 5).wrapping_add(h)).wrapping_add(*b as u64);
+    }
+    1u64 << (h % 64)
+}
+
+fn hit_matches_query_cached(hit: &CachedHit, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    let tokens: Vec<&str> = token_stream(&q).collect();
+    // Bloom gate: all query tokens must have bits set
+    for t in &tokens {
+        let bit = hash_token(t);
+        if hit.bloom64 & bit == 0 {
+            return false;
+        }
+    }
+
+    // Fallback substring checks on lowered fields
+    hit.lc_content.contains(&q)
+        || hit
+            .lc_title
+            .as_ref()
+            .map(|t: &String| t.contains(&q))
+            .unwrap_or(false)
+        || hit.lc_snippet.contains(&q)
+}
+
+fn is_prefix_only(query: &str) -> bool {
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    tokens
+        .iter()
+        .all(|t| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric()))
+}
+
+fn quick_prefix_snippet(content: &str, query: &str, max_chars: usize) -> String {
+    let lc_content = content.to_lowercase();
+    let lc_query = query.to_lowercase();
+    if let Some(pos) = lc_content.find(&lc_query) {
+        // convert byte index to char index
+        let start_char = content[..pos].chars().count().saturating_sub(15);
+        let snippet: String = content.chars().skip(start_char).take(max_chars).collect();
+        if snippet.len() < content.len() {
+            format!("{snippet}…")
+        } else {
+            snippet
+        }
+    } else {
+        let snippet: String = content.chars().take(max_chars).collect();
+        if content.chars().count() > max_chars {
+            format!("{snippet}…")
+        } else {
+            snippet
+        }
+    }
+}
+
+fn cached_prefix_snippet(content: &str, query: &str, max_chars: usize) -> Option<String> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    let lc_content = content.to_lowercase();
+    let lc_query = query.to_lowercase();
+    lc_content.find(&lc_query).map(|pos| {
+        let start_char = content[..pos].chars().count().saturating_sub(15);
+        let snippet: String = content.chars().skip(start_char).take(max_chars).collect();
+        if snippet.len() < content.len() {
+            format!("{snippet}…")
+        } else {
+            snippet
+        }
+    })
+}
+
+fn filters_fingerprint(filters: &SearchFilters) -> String {
+    let mut parts = Vec::new();
+    if !filters.agents.is_empty() {
+        let mut v: Vec<_> = filters.agents.iter().cloned().collect();
+        v.sort();
+        parts.push(format!("a:{:?}", v));
+    }
+    if !filters.workspaces.is_empty() {
+        let mut v: Vec<_> = filters.workspaces.iter().cloned().collect();
+        v.sort();
+        parts.push(format!("w:{:?}", v));
+    }
+    if let Some(f) = filters.created_from {
+        parts.push(format!("from:{f}"));
+    }
+    if let Some(t) = filters.created_to {
+        parts.push(format!("to:{t}"));
+    }
+    parts.join("|")
+}
+
+impl SearchClient {
+    fn maybe_reload_reader(&self, reader: &IndexReader) -> Result<()> {
+        const MIN_RELOAD_INTERVAL: Duration = Duration::from_millis(300);
+        let now = Instant::now();
+        let mut guard = self.last_reload.lock().unwrap();
+        if guard
+            .map(|t| now.duration_since(t) >= MIN_RELOAD_INTERVAL)
+            .unwrap_or(true)
+        {
+            reader.reload()?;
+            *guard = Some(now);
+            self.metrics.inc_reload();
+        }
+        Ok(())
+    }
+
+    fn cache_key(&self, query: &str, filters: &SearchFilters) -> String {
+        format!("{query}::{}", filters_fingerprint(filters))
+    }
+
+    fn shard_name(&self, filters: &SearchFilters) -> String {
+        if filters.agents.len() == 1 {
+            filters
+                .agents
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "global".into())
+        } else {
+            "global".into()
+        }
+    }
+
+    fn cached_prefix_hits(&self, query: &str, filters: &SearchFilters) -> Option<Vec<CachedHit>> {
+        if query.is_empty() {
+            return None;
+        }
+        let cache = self.prefix_cache.lock().ok()?;
+        let shard_name = self.shard_name(filters);
+        let shard = cache.shard_opt(&shard_name)?;
+        // Iterate over character boundaries to avoid slicing mid-codepoint.
+        let mut byte_indices: Vec<usize> = query.char_indices().map(|(i, _)| i).collect();
+        byte_indices.push(query.len());
+        for &end in byte_indices.iter().rev() {
+            if end == 0 {
+                continue;
+            }
+            let key = self.cache_key(&query[..end], filters);
+            if let Some(hits) = shard.peek(&key) {
+                return Some(hits.clone());
+            }
+        }
+        None
+    }
+
+    fn put_cache(&self, query: &str, filters: &SearchFilters, hits: &[SearchHit]) {
+        if query.is_empty() || hits.is_empty() {
+            return;
+        }
+        if let Ok(mut cache) = self.prefix_cache.lock() {
+            let shard_name = self.shard_name(filters);
+            let key = self.cache_key(query, filters);
+            let shard = cache.shard_mut(&shard_name);
+            let cached_hits: Vec<CachedHit> = hits.iter().map(cached_hit_from).collect();
+            shard.put(key, cached_hits);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::connectors::{NormalizedConversation, NormalizedMessage, NormalizedSnippet};
     use crate::search::tantivy::TantivyIndex;
     use tempfile::TempDir;
+
+    #[test]
+    fn cache_prefix_lookup_handles_utf8_boundaries() {
+        let client = SearchClient {
+            reader: None,
+            sqlite: None,
+            prefix_cache: Mutex::new(CacheShards::default()),
+            last_reload: Mutex::new(None),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+        };
+
+        let mut hits = Vec::new();
+        hits.push(SearchHit {
+            title: "こんにちは".into(),
+            snippet: "".into(),
+            content: "こんにちは 世界".into(),
+            score: 1.0,
+            source_path: "p".into(),
+            agent: "a".into(),
+            workspace: "w".into(),
+            created_at: None,
+            line_number: None,
+        });
+
+        client.put_cache("こん", &SearchFilters::default(), &hits);
+
+        let cached = client
+            .cached_prefix_hits("こんにちは", &SearchFilters::default())
+            .unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].hit.title, "こんにちは");
+    }
+
+    #[test]
+    fn bloom_gate_rejects_missing_terms() {
+        let hit = SearchHit {
+            title: "hello world".into(),
+            snippet: "hello world".into(),
+            content: "hello world".into(),
+            score: 1.0,
+            source_path: "p".into(),
+            agent: "a".into(),
+            workspace: "w".into(),
+            created_at: None,
+            line_number: None,
+        };
+        let cached = cached_hit_from(&hit);
+        assert!(hit_matches_query_cached(&cached, "hello"));
+        assert!(!hit_matches_query_cached(&cached, "missing"));
+
+        let metrics = Metrics::default();
+        metrics.inc_cache_hits();
+        metrics.inc_cache_miss();
+        metrics.inc_cache_shortfall();
+        metrics.inc_reload();
+        assert_eq!(metrics.snapshot(), (1, 1, 1, 1));
+    }
 
     #[test]
     fn search_returns_results_with_filters_and_pagination() -> Result<()> {
@@ -587,6 +1123,124 @@ mod tests {
         let hits = client.search("cma-es", SearchFilters::default(), 10, 0)?;
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.to_lowercase().contains("cma"));
+        Ok(())
+    }
+
+    #[test]
+    fn search_matches_prefix_edge_ngram() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("math logic".into()),
+            workspace: Some(std::path::PathBuf::from("/ws/m")),
+            source_path: dir.path().join("math.jsonl"),
+            started_at: Some(1000),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(1000),
+                content: "please calculate the entropy".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // "cal" should match "calculate"
+        let hits = client.search("cal", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("calculate"));
+
+        // "entr" should match "entropy"
+        let hits = client.search("entr", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_matches_snake_case() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("code".into()),
+            workspace: None,
+            source_path: dir.path().join("c.jsonl"),
+            started_at: Some(1),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(1),
+                content: "check the my_variable_name please".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // "vari" should match "variable" inside "my_variable_name"
+        let hits = client.search("vari", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+
+        // "my_variable" should match "my_variable_name" (because it splits to "my variable")
+        let hits = client.search("my_variable", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_matches_symbols_stripped() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("symbols".into()),
+            workspace: None,
+            source_path: dir.path().join("s.jsonl"),
+            started_at: Some(1),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(1),
+                content: "working with c++ and foo.bar today".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // "c++" -> "c"
+        let hits = client.search("c++", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+
+        // "foo.bar" -> "foo", "bar"
+        let hits = client.search("foo.bar", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+
         Ok(())
     }
 }

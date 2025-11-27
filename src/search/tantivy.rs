@@ -195,7 +195,8 @@ pub fn fields_from_schema(schema: &Schema) -> Result<Fields> {
 }
 
 fn build_preview(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+    let char_count = content.chars().count();
+    if char_count <= max_chars {
         return content.to_string();
     }
     let mut out = String::new();

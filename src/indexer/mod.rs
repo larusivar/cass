@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,6 +16,15 @@ use crate::connectors::{
 use crate::search::tantivy::{TantivyIndex, index_dir};
 use crate::storage::sqlite::SqliteStorage;
 
+#[derive(Debug, Default)]
+pub struct IndexingProgress {
+    pub total: AtomicUsize,
+    pub current: AtomicUsize,
+    // Simple phase indicator: 0=Idle, 1=Scanning, 2=Indexing
+    pub phase: AtomicUsize,
+    pub is_rebuilding: AtomicBool,
+}
+
 #[derive(Clone)]
 pub struct IndexOptions {
     pub full: bool,
@@ -22,12 +32,27 @@ pub struct IndexOptions {
     pub watch: bool,
     pub db_path: PathBuf,
     pub data_dir: PathBuf,
+    pub progress: Option<Arc<IndexingProgress>>,
 }
 
 pub fn run_index(opts: IndexOptions) -> Result<()> {
     let mut storage = SqliteStorage::open(&opts.db_path)?;
     let index_path = index_dir(&opts.data_dir)?;
-    let mut t_index = if opts.force_rebuild {
+
+    // Detect if we are rebuilding due to missing meta/schema mismatch
+    let needs_rebuild = opts.force_rebuild
+        || !index_path.join("meta.json").exists()
+        || (index_path.join("schema_hash.json").exists()
+            && !std::fs::read_to_string(index_path.join("schema_hash.json"))?
+                .contains(crate::search::tantivy::SCHEMA_HASH));
+
+    if needs_rebuild {
+        if let Some(p) = &opts.progress {
+            p.is_rebuilding.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let mut t_index = if needs_rebuild {
         std::fs::remove_dir_all(&index_path).ok();
         TantivyIndex::open_or_create(&index_path)?
     } else {
@@ -48,13 +73,14 @@ pub fn run_index(opts: IndexOptions) -> Result<()> {
         ("amp", Box::new(AmpConnector::new())),
     ];
 
-    for (name, conn) in connectors {
+    // First pass: Scan all to get counts if we have progress tracker
+    let mut pending_batches = Vec::new();
+    if let Some(p) = &opts.progress {
+        p.phase.store(1, Ordering::Relaxed); // Scanning
+    }
+
+    for (name, conn) in &connectors {
         let detect = conn.detect();
-        tracing::info!(
-            connector = name,
-            detected = detect.detected,
-            "connector_detect"
-        );
         if !detect.detected {
             continue;
         }
@@ -62,8 +88,27 @@ pub fn run_index(opts: IndexOptions) -> Result<()> {
             data_root: opts.data_dir.clone(),
             since_ts: None,
         };
-        let convs = conn.scan(&ctx)?;
-        ingest_batch(&mut storage, &mut t_index, &convs)?;
+        // We scan here. For optimization in non-progress mode, we could stream.
+        // But to show accurate "X/Y", we need to collect.
+        match conn.scan(&ctx) {
+            Ok(convs) => {
+                if let Some(p) = &opts.progress {
+                    p.total.fetch_add(convs.len(), Ordering::Relaxed);
+                }
+                pending_batches.push((name, convs));
+            }
+            Err(e) => {
+                tracing::warn!("scan failed for {}: {}", name, e);
+            }
+        }
+    }
+
+    if let Some(p) = &opts.progress {
+        p.phase.store(2, Ordering::Relaxed); // Indexing
+    }
+
+    for (name, convs) in pending_batches {
+        ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress)?;
         tracing::info!(
             connector = name,
             conversations = convs.len(),
@@ -72,6 +117,11 @@ pub fn run_index(opts: IndexOptions) -> Result<()> {
     }
 
     t_index.commit()?;
+
+    if let Some(p) = &opts.progress {
+        p.phase.store(0, Ordering::Relaxed); // Idle
+        p.is_rebuilding.store(false, Ordering::Relaxed);
+    }
 
     if opts.watch {
         let opts_clone = opts.clone();
@@ -97,9 +147,13 @@ fn ingest_batch(
     storage: &mut SqliteStorage,
     t_index: &mut TantivyIndex,
     convs: &[NormalizedConversation],
+    progress: &Option<Arc<IndexingProgress>>,
 ) -> Result<()> {
     for conv in convs {
         persist::persist_conversation(storage, t_index, conv)?;
+        if let Some(p) = progress {
+            p.current.fetch_add(1, Ordering::Relaxed);
+        }
     }
     Ok(())
 }
@@ -226,6 +280,12 @@ fn reindex_paths(
         if !detect.detected {
             continue;
         }
+
+        // Update phase to scanning
+        if let Some(p) = &opts.progress {
+            p.phase.store(1, Ordering::Relaxed);
+        }
+
         let since_ts = {
             let guard = state.lock().unwrap();
             guard
@@ -238,8 +298,15 @@ fn reindex_paths(
             since_ts,
         };
         let convs = conn.scan(&ctx)?;
+
+        // Update total and phase to indexing
+        if let Some(p) = &opts.progress {
+            p.total.fetch_add(convs.len(), Ordering::Relaxed);
+            p.phase.store(2, Ordering::Relaxed);
+        }
+
         tracing::info!(?kind, conversations = convs.len(), since_ts, "watch_scan");
-        ingest_batch(&mut storage, &mut t_index, &convs)?;
+        ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress)?;
         if let Some(ts_val) = ts {
             let mut guard = state.lock().unwrap();
             let entry = guard.entry(kind).or_insert(ts_val);
@@ -248,6 +315,12 @@ fn reindex_paths(
         }
     }
     t_index.commit()?;
+
+    // Reset phase to idle if progress exists
+    if let Some(p) = &opts.progress {
+        p.phase.store(0, Ordering::Relaxed);
+    }
+
     Ok(())
 }
 
@@ -620,6 +693,7 @@ mod tests {
             force_rebuild: false,
             db_path: data_dir.join("agent_search.db"),
             data_dir: data_dir.clone(),
+            progress: None,
         };
 
         // Manually set up dependencies for reindex_paths
@@ -677,6 +751,64 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
 ""#,
             )
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn reindex_paths_updates_progress() {
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("xdg");
+        std::fs::create_dir_all(&xdg).unwrap();
+        let prev = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+
+        // Prepare amp fixture
+        let data_dir = dirs::data_dir().unwrap().join("amp");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let amp_dir = data_dir.join("amp");
+        std::fs::create_dir_all(&amp_dir).unwrap();
+        let amp_file = amp_dir.join("thread-progress.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        std::fs::write(
+            &amp_file,
+            format!(
+                r#"{{"id":"tp","messages":[{{"role":"user","text":"p","createdAt":{}}}]}}"#,
+                now
+            ),
+        )
+        .unwrap();
+
+        let progress = Arc::new(super::IndexingProgress::default());
+        let opts = super::IndexOptions {
+            full: false,
+            watch: false,
+            force_rebuild: false,
+            db_path: data_dir.join("db.sqlite"),
+            data_dir: data_dir.clone(),
+            progress: Some(progress.clone()),
+        };
+
+        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let state = Arc::new(Mutex::new(HashMap::new()));
+        let storage = Arc::new(Mutex::new(storage));
+        let t_index = Arc::new(Mutex::new(t_index));
+
+        reindex_paths(&opts, vec![amp_file], state, storage, t_index).unwrap();
+
+        // Progress should reflect the indexed conversation
+        assert_eq!(progress.total.load(Ordering::Relaxed), 1);
+        assert_eq!(progress.current.load(Ordering::Relaxed), 1);
+        // Phase resets to 0 (idle) at the end
+        assert_eq!(progress.phase.load(Ordering::Relaxed), 0);
+
+        if let Some(prev) = prev {
+            unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("XDG_DATA_HOME") };
         }
     }
 }

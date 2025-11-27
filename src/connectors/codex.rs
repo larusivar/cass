@@ -95,7 +95,7 @@ impl Connector for CodexConnector {
 
             if ext == Some("jsonl") {
                 // Modern envelope format: each line has {type, timestamp, payload}
-                for (_idx, line) in content.lines().enumerate() {
+                for line in content.lines() {
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -227,7 +227,7 @@ impl Connector for CodexConnector {
 
                 // Parse items array
                 if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
-                    for (_idx, item) in items.iter().enumerate() {
+                    for item in items.iter() {
                         let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("agent");
 
                         let content_str = item

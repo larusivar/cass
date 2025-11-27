@@ -248,7 +248,7 @@ impl Connector for GeminiConnector {
             let mut started_at = start_time;
             let mut ended_at = last_updated;
 
-            for (_idx, item) in messages_arr.iter().enumerate() {
+            for item in messages_arr.iter() {
                 // Role from "type" field - Gemini uses "user" and "model"
                 let msg_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("model");
                 let role = if msg_type == "model" {

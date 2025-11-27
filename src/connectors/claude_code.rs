@@ -84,7 +84,7 @@ impl Connector for ClaudeCodeConnector {
             let mut git_branch: Option<String> = None;
 
             if ext == Some("jsonl") {
-                for (_idx, line) in content.lines().enumerate() {
+                for line in content.lines() {
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -174,7 +174,7 @@ impl Connector for ClaudeCodeConnector {
                 // JSON or Claude format files
                 let val: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
                 if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
-                    for (_idx, item) in arr.iter().enumerate() {
+                    for item in arr.iter() {
                         let role = item
                             .get("role")
                             .or_else(|| item.get("type"))

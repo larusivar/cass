@@ -6,10 +6,10 @@ use tantivy::{Index, IndexReader, IndexWriter, doc};
 
 use crate::connectors::NormalizedConversation;
 
-const SCHEMA_VERSION: &str = "v2";
+const SCHEMA_VERSION: &str = "v4";
 
 // Bump this when schema/tokenizer changes. Used to trigger rebuilds.
-pub const SCHEMA_HASH: &str = "tantivy-schema-v2-hyphen-normalize";
+pub const SCHEMA_HASH: &str = "tantivy-schema-v4-edge-ngram-preview";
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -20,6 +20,9 @@ pub struct Fields {
     pub created_at: Field,
     pub title: Field,
     pub content: Field,
+    pub title_prefix: Field,
+    pub content_prefix: Field,
+    pub preview: Field,
 }
 
 pub struct TantivyIndex {
@@ -116,11 +119,36 @@ impl TantivyIndex {
             }
             if let Some(title) = &conv.title {
                 d.add_text(self.fields.title, title);
+                d.add_text(self.fields.title_prefix, generate_edge_ngrams(title));
             }
+            d.add_text(
+                self.fields.content_prefix,
+                generate_edge_ngrams(&msg.content),
+            );
+            d.add_text(self.fields.preview, build_preview(&msg.content, 200));
             self.writer.add_document(d)?;
         }
         Ok(())
     }
+}
+
+fn generate_edge_ngrams(text: &str) -> String {
+    let mut ngrams = String::with_capacity(text.len() * 2);
+    // Split by non-alphanumeric characters to identify words
+    for word in text.split(|c: char| !c.is_alphanumeric()) {
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() < 2 {
+            continue;
+        }
+        // Generate edge ngrams of length 2..=20 (or word length)
+        for len in 2..=chars.len().min(20) {
+            if !ngrams.is_empty() {
+                ngrams.push(' ');
+            }
+            ngrams.extend(chars[0..len].iter());
+        }
+    }
+    ngrams
 }
 
 pub fn build_schema() -> Schema {
@@ -133,13 +161,22 @@ pub fn build_schema() -> Schema {
         )
         .set_stored();
 
+    let text_not_stored = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("hyphen_normalize")
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+
     schema_builder.add_text_field("agent", TEXT | STORED);
     schema_builder.add_text_field("workspace", STRING | STORED);
     schema_builder.add_text_field("source_path", STORED);
     schema_builder.add_u64_field("msg_idx", INDEXED | STORED);
-    schema_builder.add_i64_field("created_at", INDEXED | STORED);
+    schema_builder.add_i64_field("created_at", INDEXED | STORED | FAST);
     schema_builder.add_text_field("title", text.clone());
     schema_builder.add_text_field("content", text);
+    schema_builder.add_text_field("title_prefix", text_not_stored.clone());
+    schema_builder.add_text_field("content_prefix", text_not_stored);
+    schema_builder.add_text_field("preview", TEXT | STORED);
     schema_builder.build()
 }
 
@@ -157,7 +194,22 @@ pub fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         created_at: get("created_at")?,
         title: get("title")?,
         content: get("content")?,
+        title_prefix: get("title_prefix")?,
+        content_prefix: get("content_prefix")?,
+        preview: get("preview")?,
     })
+}
+
+fn build_preview(content: &str, max_chars: usize) -> String {
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+    let mut out = String::new();
+    for ch in content.chars().take(max_chars) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 pub fn index_dir(base: &Path) -> Result<std::path::PathBuf> {

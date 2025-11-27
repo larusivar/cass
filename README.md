@@ -3,7 +3,7 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)
 ![Status](https://img.shields.io/badge/status-alpha-purple.svg)
-![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 **Unified, high-performance TUI to index and search your local coding agent history.**  
 Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, and Amp into a single, searchable timeline.
@@ -387,4 +387,4 @@ cargo test --test install_scripts
 
 ## 📜 License
 
-MIT or Apache-2.0. See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE) for details.

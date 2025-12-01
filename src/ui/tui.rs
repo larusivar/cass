@@ -35,6 +35,7 @@ use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
 use crate::ui::components::widgets::search_bar;
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
+use crate::ui::shortcuts;
 use crate::update_check::{UpdateInfo, open_in_browser, skip_version, spawn_update_check};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,7 +52,7 @@ enum MatchMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RankingMode {
+pub enum RankingMode {
     RecentHeavy,
     Balanced,
     RelevanceHeavy,
@@ -760,7 +761,7 @@ fn format_absolute_time(timestamp_ms: i64) -> String {
 fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let add_section = |title: &str, items: &[&str]| -> Vec<Line<'static>> {
+    let add_section = |title: &str, items: &[String]| -> Vec<Line<'static>> {
         let mut v = Vec::new();
         v.push(Line::from(Span::styled(title.to_string(), palette.title())));
         for item in items {
@@ -813,11 +814,12 @@ fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
     lines.extend(add_section(
         "Data Locations",
         &[
-            "Index & state: ~/.local/share/coding-agent-search/",
-            "  agent_search.db - Full-text search index",
-            "  tui_state.json - Persisted UI preferences",
-            "  update_state.json - Update check state",
-            "Agent histories auto-detected from: Claude, Codex, Gemini, Copilot, Cursor",
+            "Index & state: ~/.local/share/coding-agent-search/".to_string(),
+            "  agent_search.db - Full-text search index".to_string(),
+            "  tui_state.json - Persisted UI preferences".to_string(),
+            "  update_state.json - Update check state".to_string(),
+            "Agent histories auto-detected from: Claude, Codex, Gemini, Copilot, Cursor"
+                .to_string(),
         ],
     ));
 
@@ -825,86 +827,128 @@ fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
     lines.extend(add_section(
         "Updates",
         &[
-            "Checks GitHub releases hourly (offline-friendly, no auto-download)",
-            "When available: banner shows at top with U/S/Esc options",
-            "  U - Open release page in browser (Shift+U)",
-            "  S - Skip this version permanently (Shift+S)",
-            "  Esc - Dismiss banner for this session",
+            "Checks GitHub releases hourly (offline-friendly, no auto-download)".to_string(),
+            "When available: banner shows at top with U/S/Esc options".to_string(),
+            "  U - Open release page in browser (Shift+U)".to_string(),
+            "  S - Skip this version permanently (Shift+S)".to_string(),
+            "  Esc - Dismiss banner for this session".to_string(),
         ],
     ));
 
     lines.extend(add_section(
         "Search",
         &[
-            "type to live-search; / focuses query; Ctrl-R cycles history",
-            "Wildcards: foo* (prefix), *foo (suffix), *foo* (contains)",
-            "Auto-fuzzy: searches with few results try *term* fallback",
-            "Ctrl+Shift+R refresh search (re-query index)",
+            format!(
+                "type to live-search; {} focuses query; {} cycles history",
+                shortcuts::FOCUS_QUERY,
+                shortcuts::HISTORY_CYCLE
+            ),
+            "Wildcards: foo* (prefix), *foo (suffix), *foo* (contains)".to_string(),
+            "Auto-fuzzy: searches with few results try *term* fallback".to_string(),
+            format!("{} refresh search (re-query index)", shortcuts::REFRESH),
         ],
     ));
     lines.extend(add_section(
         "Filters",
         &[
-            "F3 agent | F4 workspace | F5 from | F6 to | Ctrl+Del clear all",
-            "Shift+F3 scope to active agent | Shift+F4 clear scope | Shift+F5 cycle time presets (24h/7d/30d/all)",
-            "Chips in search bar; Backspace removes last; Enter (query empty) edits last chip",
+            format!("{} agent | {} workspace | {} from | {} to | {} clear all", 
+                shortcuts::FILTER_AGENT, shortcuts::FILTER_WORKSPACE, shortcuts::FILTER_DATE_FROM, shortcuts::FILTER_DATE_TO, shortcuts::CLEAR_FILTERS),
+            format!("{} scope to active agent | {} clear scope | {} cycle time presets (24h/7d/30d/all)",
+                shortcuts::SCOPE_AGENT, shortcuts::SCOPE_WORKSPACE, shortcuts::CYCLE_TIME_PRESETS),
+            "Chips in search bar; Backspace removes last; Enter (query empty) edits last chip".to_string(),
         ],
     ));
     lines.extend(add_section(
         "Modes",
         &[
-            "F9 match mode: prefix (default) ⇄ standard",
-            "F12 ranking: recent → balanced → relevance → match-quality",
-            "F2 theme: dark/light | Ctrl+B toggle border style",
+            format!(
+                "{} match mode: prefix (default) ⇄ standard",
+                shortcuts::MATCH_MODE
+            ),
+            format!(
+                "{} ranking: recent → balanced → relevance → match-quality",
+                shortcuts::RANKING
+            ),
+            format!(
+                "{} theme: dark/light | Ctrl+B toggle border style",
+                shortcuts::THEME
+            ),
         ],
     ));
     lines.extend(add_section(
         "Context",
         &[
-            "F7 cycles S/M/L/XL context window",
-            "Space: peek XL for current hit, tap again to restore",
+            format!(
+                "{} cycles S/M/L/XL context window",
+                shortcuts::CONTEXT_WINDOW
+            ),
+            "Space: peek XL for current hit, tap again to restore".to_string(),
         ],
     ));
     lines.extend(add_section(
         "Density",
-        &["Shift+=/+ increase pane items; - decrease (min 4, max 50)"],
+        &["Shift+=/+ increase pane items; - decrease (min 4, max 50)".to_string()],
     ));
     lines.extend(add_section(
         "Navigation",
         &[
-            "Arrows move; Left/Right pane; PgUp/PgDn page",
-            "Alt+h/j/k/l vim-style nav (when results showing)",
-            "Home/End or Alt+g/G jump to first/last item",
-            "Ctrl+M toggle select; A bulk actions; Esc clears selection",
-            "Tab toggles focus (Results ⇄ Detail)",
-            "[ / ] cycle detail tabs (Messages/Snippets/Raw)",
+            "Arrows move; Left/Right pane; PgUp/PgDn page".to_string(),
+            format!(
+                "{} vim-style nav (when results showing)",
+                shortcuts::VIM_NAV
+            ),
+            format!("{} or Alt+g/G jump to first/last item", shortcuts::JUMP_TOP),
+            format!(
+                "{} toggle select; {} bulk actions; Esc clears selection",
+                shortcuts::TOGGLE_SELECT,
+                shortcuts::BULK_MENU
+            ),
+            format!("{} toggles focus (Results ⇄ Detail)", shortcuts::TAB_FOCUS),
+            "[ / ] cycle detail tabs (Messages/Snippets/Raw)".to_string(),
         ],
     ));
     lines.extend(add_section(
         "Mouse",
         &[
-            "Click pane/item to select; click detail area to focus",
-            "Scroll wheel: navigate results or scroll detail",
+            "Click pane/item to select; click detail area to focus".to_string(),
+            "Scroll wheel: navigate results or scroll detail".to_string(),
         ],
     ));
     lines.extend(add_section(
         "Actions",
         &[
-            "Enter opens detail modal (o=open, c=copy, p=path, s=snip, n=nano, Esc=close)",
-            "F8 open hit in $EDITOR; y copy path/content",
-            "/ detail-find within messages; n/N cycle matches",
-            "F1/? toggle this help; Esc/F10 quit (or back from detail)",
+            format!(
+                "{} opens detail modal (o=open, c=copy, p=path, s=snip, n=nano, Esc=close)",
+                shortcuts::DETAIL_OPEN
+            ),
+            format!(
+                "{} open hit in $EDITOR; {} copy path/content",
+                shortcuts::EDITOR,
+                shortcuts::COPY
+            ),
+            format!(
+                "{} detail-find within messages; n/N cycle matches",
+                shortcuts::PANE_FILTER
+            ),
+            format!(
+                "{}/? toggle this help; {} quit (or back from detail)",
+                shortcuts::HELP,
+                shortcuts::QUIT
+            ),
         ],
     ));
     lines.extend(add_section(
         "States",
-        &["match mode + context persist in tui_state.json (data dir); delete to reset"],
+        &[
+            "match mode + context persist in tui_state.json (data dir); delete to reset"
+                .to_string(),
+        ],
     ));
     lines.extend(add_section(
         "Empty state",
         &[
-            "Shows recent per-agent hits before typing",
-            "Recent query suggestions appear when query is empty",
+            "Shows recent per-agent hits before typing".to_string(),
+            "Recent query suggestions appear when query is empty".to_string(),
         ],
     ));
 
@@ -1704,6 +1748,8 @@ fn ranking_from_str(s: &str) -> RankingMode {
     }
 }
 
+use crate::ui::components::breadcrumbs::{self, BreadcrumbKind};
+
 fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     if !filters.agents.is_empty() {
@@ -1754,14 +1800,14 @@ fn contextual_shortcuts(
 ) -> Vec<(String, String)> {
     if palette_open {
         return vec![
-            ("Esc".into(), "Close".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Close".into()),
             ("↑/↓".into(), "Select".into()),
-            ("Enter".into(), "Run".into()),
+            (shortcuts::DETAIL_OPEN.into(), "Run".into()),
         ];
     }
     if show_detail_modal {
         return vec![
-            ("Esc".into(), "Close detail".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Close detail".into()),
             ("j/k".into(), "Scroll".into()),
             ("Home/End".into(), "Top/Bottom".into()),
             ("c".into(), "Copy".into()),
@@ -1770,47 +1816,55 @@ fn contextual_shortcuts(
     match input_mode {
         InputMode::Agent => vec![
             ("type".into(), "Agent filter".into()),
-            ("Enter".into(), "Apply".into()),
-            ("Esc".into(), "Cancel".into()),
+            (shortcuts::DETAIL_OPEN.into(), "Apply".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Cancel".into()),
         ],
         InputMode::Workspace => vec![
             ("type".into(), "Workspace filter".into()),
-            ("Enter".into(), "Apply".into()),
-            ("Esc".into(), "Cancel".into()),
+            (shortcuts::DETAIL_OPEN.into(), "Apply".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Cancel".into()),
         ],
         InputMode::PaneFilter => vec![
             ("type".into(), "Pane filter".into()),
-            ("Enter".into(), "Apply".into()),
-            ("Esc".into(), "Clear".into()),
+            (shortcuts::DETAIL_OPEN.into(), "Apply".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Clear".into()),
         ],
         InputMode::CreatedFrom | InputMode::CreatedTo => vec![
             ("type".into(), "Date (YYYY-MM-DD)".into()),
-            ("Enter".into(), "Apply".into()),
-            ("Esc".into(), "Cancel".into()),
+            (shortcuts::DETAIL_OPEN.into(), "Apply".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Cancel".into()),
         ],
         InputMode::DetailFind => vec![
             ("type".into(), "Find term".into()),
-            ("Enter".into(), "Apply".into()),
-            ("Esc".into(), "Cancel".into()),
+            (shortcuts::DETAIL_OPEN.into(), "Apply".into()),
+            (shortcuts::DETAIL_CLOSE.into(), "Cancel".into()),
         ],
         InputMode::Query => match focus_region {
             FocusRegion::Results => vec![
                 ("Ctrl+P".into(), "Palette".into()),
-                ("Enter".into(), "Open detail".into()),
+                (shortcuts::DETAIL_OPEN.into(), "Open detail".into()),
                 ("m".into(), "Select".into()),
-                ("A".into(), "Bulk menu".into()),
-                ("/".into(), "Pane filter".into()),
-                ("F3/F4/F5".into(), "Filters".into()),
-                ("Esc".into(), "Quit/back".into()),
+                (shortcuts::BULK_MENU.into(), "Bulk menu".into()),
+                (shortcuts::PANE_FILTER.into(), "Pane filter".into()),
+                (
+                    format!(
+                        "{}/{}/{}",
+                        shortcuts::FILTER_AGENT,
+                        shortcuts::FILTER_WORKSPACE,
+                        shortcuts::FILTER_DATE_FROM
+                    ),
+                    "Filters".into(),
+                ),
+                (shortcuts::QUIT.into(), "Quit/back".into()),
             ],
             FocusRegion::Detail => vec![
-                ("Tab".into(), "Focus results".into()),
+                (shortcuts::TAB_FOCUS.into(), "Focus results".into()),
                 ("←/→".into(), "Tabs".into()),
-                ("/".into(), "Find in detail".into()),
+                (shortcuts::PANE_FILTER.into(), "Find in detail".into()),
                 ("n/N".into(), "Next/prev match".into()),
                 ("c".into(), "Copy".into()),
                 ("o".into(), "Open file".into()),
-                ("Esc".into(), "Close detail".into()),
+                (shortcuts::DETAIL_CLOSE.into(), "Close detail".into()),
             ],
         },
     }
@@ -1865,93 +1919,6 @@ fn save_state(path: &std::path::Path, state: &TuiStatePersisted) {
     if let Ok(body) = serde_json::to_string_pretty(state) {
         let _ = std::fs::write(path, body);
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BreadcrumbKind {
-    Agent,
-    Workspace,
-    Date,
-    Ranking,
-}
-
-fn ranking_label(r: RankingMode) -> &'static str {
-    match r {
-        RankingMode::RecentHeavy => "Recent",
-        RankingMode::Balanced => "Balanced",
-        RankingMode::RelevanceHeavy => "Relevance",
-        RankingMode::MatchQualityHeavy => "Quality",
-        RankingMode::DateNewest => "Newest",
-        RankingMode::DateOldest => "Oldest",
-    }
-}
-
-fn breadcrumb_spans(
-    filters: &SearchFilters,
-    ranking: RankingMode,
-    palette: ThemePalette,
-) -> Vec<(BreadcrumbKind, Span<'static>)> {
-    let agent = if filters.agents.is_empty() {
-        "All agents".to_string()
-    } else {
-        filters.agents.iter().cloned().collect::<Vec<_>>().join(",")
-    };
-    let workspace = if filters.workspaces.is_empty() {
-        "All workspaces".to_string()
-    } else {
-        filters
-            .workspaces
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let date = match (filters.created_from, filters.created_to) {
-        (None, None) => "Any time".to_string(),
-        (Some(f), None) => format!("From {}", format_time_short(f)),
-        (None, Some(t)) => format!("To {}", format_time_short(t)),
-        (Some(f), Some(t)) => format!("{} → {}", format_time_short(f), format_time_short(t)),
-    };
-    let rank = ranking_label(ranking).to_string();
-
-    vec![
-        (
-            BreadcrumbKind::Agent,
-            Span::styled(agent, Style::default().fg(palette.fg)),
-        ),
-        (
-            BreadcrumbKind::Workspace,
-            Span::styled(workspace, Style::default().fg(palette.fg)),
-        ),
-        (
-            BreadcrumbKind::Date,
-            Span::styled(date, Style::default().fg(palette.fg)),
-        ),
-        (
-            BreadcrumbKind::Ranking,
-            Span::styled(rank, Style::default().fg(palette.accent)),
-        ),
-    ]
-}
-
-fn render_breadcrumbs(
-    f: &mut Frame<'_>,
-    area: Rect,
-    crumbs: &[(BreadcrumbKind, Span<'static>)],
-    palette: ThemePalette,
-) -> Vec<(Rect, BreadcrumbKind)> {
-    let mut spans: Vec<Span> = Vec::new();
-    for (idx, (_kind, span)) in crumbs.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::styled(" | ", Style::default().fg(palette.hint)));
-        }
-        spans.push(span.clone());
-    }
-    let para = Paragraph::new(Line::from(spans))
-        .block(Block::default().style(Style::default().fg(palette.hint)));
-    f.render_widget(para, area);
-    // For now, return the whole area tagged as a generic breadcrumb; mouse hit detection not used.
-    crumbs.iter().map(|(kind, _)| (area, *kind)).collect()
 }
 
 /// Save a query to the history, avoiding duplicates and limiting size.
@@ -2143,7 +2110,7 @@ fn render_inline_markdown_line(
 
 /// Format a timestamp as a short human-readable date for filter chips.
 /// Shows "Nov 25" for same year, "Nov 25, 2023" for other years.
-fn format_time_short(ms: i64) -> String {
+pub fn format_time_short(ms: i64) -> String {
     let now = Utc::now();
     DateTime::<Utc>::from_timestamp_millis(ms)
         .map(|dt| {
@@ -2717,8 +2684,13 @@ pub fn run_tui(
                     .collect();
 
                 // Breadcrumb/locality bar
-                let crumbs = breadcrumb_spans(&filters, ranking_mode, palette);
-                let bc_rects = render_breadcrumbs(f, search_split[2], &crumbs, palette);
+                let bc_rects = breadcrumbs::render_breadcrumbs(
+                    f,
+                    search_split[2],
+                    &filters,
+                    ranking_mode,
+                    palette,
+                );
                 last_breadcrumb_rects = bc_rects;
 
                 // Responsive layout: detail pane expands when focused

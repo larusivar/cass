@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::ui::components::theme::{ThemePalette, colors, kbd_style};
 use crate::ui::data::InputMode;
+use crate::ui::shortcuts;
 
 /// Premium search bar widget with refined visual hierarchy.
 ///
@@ -105,17 +106,25 @@ pub fn search_bar(
     // Context-aware hints line - minimal, not overwhelming
     let tips_line = if in_query_mode {
         Line::from(vec![
-            Span::styled("F1", kbd_style(palette)),
+            Span::styled(shortcuts::HELP, kbd_style(palette)),
             Span::styled(" help", Style::default().fg(palette.hint)),
             Span::styled("  ·  ", Style::default().fg(colors::TEXT_DISABLED)),
-            Span::styled("F3", Style::default().fg(palette.hint)),
+            Span::styled(shortcuts::FILTER_AGENT, Style::default().fg(palette.hint)),
             Span::styled(" agent", Style::default().fg(palette.hint)),
-            Span::styled("  F4", Style::default().fg(palette.hint)),
+            Span::raw("  "),
+            Span::styled(
+                shortcuts::FILTER_WORKSPACE,
+                Style::default().fg(palette.hint),
+            ),
             Span::styled(" workspace", Style::default().fg(palette.hint)),
-            Span::styled("  F5", Style::default().fg(palette.hint)),
+            Span::raw("  "),
+            Span::styled(
+                shortcuts::FILTER_DATE_FROM,
+                Style::default().fg(palette.hint),
+            ),
             Span::styled(" time", Style::default().fg(palette.hint)),
             Span::styled("  ·  ", Style::default().fg(colors::TEXT_DISABLED)),
-            Span::styled("Ctrl+Del", Style::default().fg(palette.hint)),
+            Span::styled(shortcuts::CLEAR_FILTERS, Style::default().fg(palette.hint)),
             Span::styled(" clear", Style::default().fg(palette.hint)),
         ])
     } else {

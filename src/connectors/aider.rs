@@ -139,11 +139,7 @@ impl Connector for AiderConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        let mut roots = vec![ctx.data_root.clone()];
-        if let Ok(cwd) = std::env::current_dir() {
-            roots.push(cwd);
-        }
-        let files = Self::find_chat_files(&roots);
+        let files = Self::find_chat_files(std::slice::from_ref(&ctx.data_root));
 
         let mut conversations = Vec::new();
         for path in files {

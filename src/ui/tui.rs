@@ -4943,7 +4943,8 @@ pub fn run_tui(
                             if selected.is_empty() {
                                 status = "No items queued. Ctrl+Enter to queue items.".to_string();
                                 open_confirm_armed = false;
-                            } else if selected.len() >= OPEN_CONFIRM_THRESHOLD && !open_confirm_armed
+                            } else if selected.len() >= OPEN_CONFIRM_THRESHOLD
+                                && !open_confirm_armed
                             {
                                 open_confirm_armed = true;
                                 status = format!(
@@ -6148,6 +6149,7 @@ pub fn run_tui(
                                 );
                                 // Clear multi-selection when results change
                                 selected.clear();
+                                open_confirm_armed = false;
                                 // Start staggered reveal animation for new results (bead 013)
                                 if animations_enabled && !panes.is_empty() {
                                     reveal_anim_start = Some(Instant::now());
@@ -6178,6 +6180,7 @@ pub fn run_tui(
                             results.clear();
                             panes.clear();
                             selected.clear();
+                            open_confirm_armed = false;
                             active_pane = 0;
                             cache_stats = None;
                             needs_draw = true;

@@ -44,7 +44,7 @@ pub mod colors {
     pub const TEXT_SECONDARY: Color = Color::Rgb(169, 177, 214); // #a9b1d6
 
     /// Muted text - hints, placeholders, timestamps
-    pub const TEXT_MUTED: Color = Color::Rgb(104, 114, 165); // #6872a5 (boosted contrast for WCAG)
+    pub const TEXT_MUTED: Color = Color::Rgb(86, 95, 137); // #565f89 (original Tokyo Night)
 
     /// Disabled/inactive text
     pub const TEXT_DISABLED: Color = Color::Rgb(68, 75, 106); // #444b6a
@@ -95,26 +95,35 @@ pub mod colors {
     pub const STATUS_INFO: Color = Color::Rgb(125, 207, 255); // #7dcfff
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // AGENT-SPECIFIC TINTS - Subtle background variations
+    // AGENT-SPECIFIC TINTS - Distinct background variations per agent
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Claude Code - subtle blue tint
-    pub const AGENT_CLAUDE_BG: Color = Color::Rgb(28, 31, 48); // blue tint
+    /// Claude Code - distinct blue tint
+    pub const AGENT_CLAUDE_BG: Color = Color::Rgb(24, 30, 52); // #181e34 - blue
 
-    /// Codex - subtle green tint
-    pub const AGENT_CODEX_BG: Color = Color::Rgb(26, 32, 35); // green tint
+    /// Codex - distinct green tint
+    pub const AGENT_CODEX_BG: Color = Color::Rgb(22, 38, 32); // #162620 - green
 
-    /// Cline - subtle cyan tint
-    pub const AGENT_CLINE_BG: Color = Color::Rgb(25, 31, 38); // cyan tint
+    /// Cline - distinct cyan tint
+    pub const AGENT_CLINE_BG: Color = Color::Rgb(20, 34, 42); // #14222a - cyan
 
-    /// Gemini - subtle purple tint
-    pub const AGENT_GEMINI_BG: Color = Color::Rgb(32, 28, 42); // purple tint
+    /// Gemini - distinct purple tint
+    pub const AGENT_GEMINI_BG: Color = Color::Rgb(34, 24, 48); // #221830 - purple
 
-    /// Amp - subtle warm tint
-    pub const AGENT_AMP_BG: Color = Color::Rgb(34, 28, 30); // warm tint
+    /// Amp - distinct warm/orange tint
+    pub const AGENT_AMP_BG: Color = Color::Rgb(42, 28, 24); // #2a1c18 - warm
 
-    /// `OpenCode` - neutral
-    pub const AGENT_OPENCODE_BG: Color = Color::Rgb(30, 31, 36); // neutral
+    /// Aider - distinct teal tint
+    pub const AGENT_AIDER_BG: Color = Color::Rgb(20, 36, 36); // #142424 - teal
+
+    /// Cursor - distinct magenta tint
+    pub const AGENT_CURSOR_BG: Color = Color::Rgb(38, 24, 38); // #261826 - magenta
+
+    /// ChatGPT - distinct emerald tint
+    pub const AGENT_CHATGPT_BG: Color = Color::Rgb(20, 38, 28); // #14261c - emerald
+
+    /// `OpenCode` - neutral gray
+    pub const AGENT_OPENCODE_BG: Color = Color::Rgb(32, 32, 36); // #202024 - neutral
 
     // ═══════════════════════════════════════════════════════════════════════════
     // ROLE-AWARE BACKGROUND TINTS - Subtle backgrounds per message type
@@ -403,21 +412,25 @@ impl ThemePalette {
         Style::default().bg(self.surface)
     }
 
-    /// Per-agent pane colors - subtle tinted backgrounds with consistent text colors.
+    /// Per-agent pane colors - distinct tinted backgrounds with consistent text colors.
     ///
-    /// Design philosophy: Instead of jarring, wildly different color schemes per agent,
-    /// we use subtle background tints while keeping text colors consistent for legibility.
-    /// This creates visual differentiation without sacrificing readability or cohesion.
+    /// Design philosophy: Each agent gets a visually distinct background color that makes
+    /// it immediately clear which tool produced the result. Accent colors are chosen to
+    /// complement the background while remaining cohesive.
     pub fn agent_pane(agent: &str) -> PaneTheme {
         let slug = agent.to_lowercase().replace('-', "_");
 
         let (bg, accent) = match slug.as_str() {
-            "claude_code" | "claude" => (colors::AGENT_CLAUDE_BG, colors::ACCENT_PRIMARY),
-            "codex" => (colors::AGENT_CODEX_BG, colors::STATUS_SUCCESS),
-            "cline" => (colors::AGENT_CLINE_BG, colors::ACCENT_TERTIARY),
-            "gemini" | "gemini_cli" => (colors::AGENT_GEMINI_BG, colors::ACCENT_SECONDARY),
-            "amp" => (colors::AGENT_AMP_BG, colors::STATUS_ERROR),
-            "opencode" => (colors::AGENT_OPENCODE_BG, colors::ROLE_USER),
+            // Core agents with distinct color identities
+            "claude_code" | "claude" => (colors::AGENT_CLAUDE_BG, colors::ACCENT_PRIMARY), // Blue
+            "codex" => (colors::AGENT_CODEX_BG, colors::STATUS_SUCCESS),                   // Green
+            "cline" => (colors::AGENT_CLINE_BG, colors::ACCENT_TERTIARY),                  // Cyan
+            "gemini" | "gemini_cli" => (colors::AGENT_GEMINI_BG, colors::ACCENT_SECONDARY), // Purple
+            "amp" => (colors::AGENT_AMP_BG, colors::STATUS_ERROR), // Orange/Red
+            "aider" => (colors::AGENT_AIDER_BG, Color::Rgb(64, 224, 208)), // Turquoise accent
+            "cursor" => (colors::AGENT_CURSOR_BG, Color::Rgb(236, 72, 153)), // Pink accent
+            "chatgpt" => (colors::AGENT_CHATGPT_BG, Color::Rgb(16, 163, 127)), // ChatGPT green
+            "opencode" => (colors::AGENT_OPENCODE_BG, colors::ROLE_USER), // Neutral/sage
             _ => (colors::BG_DEEP, colors::ACCENT_PRIMARY),
         };
 
@@ -437,6 +450,9 @@ impl ThemePalette {
             "gemini" | "gemini_cli" => "💎",
             "cline" => "🧭",
             "amp" => "⚡",
+            "aider" => "🔧",
+            "cursor" => "🎯",
+            "chatgpt" => "💬",
             "opencode" => "📦",
             _ => "✨",
         }
@@ -826,7 +842,7 @@ impl ThemePalette {
             bg: Color::Rgb(40, 42, 54),            // Background
             fg: Color::Rgb(248, 248, 242),         // Foreground
             surface: Color::Rgb(68, 71, 90),       // Current Line
-            hint: Color::Rgb(130, 146, 200),       // Comment (higher contrast)
+            hint: Color::Rgb(98, 114, 164),        // Comment (#6272a4 - original Dracula)
             border: Color::Rgb(68, 71, 90),        // Current Line
             user: Color::Rgb(80, 250, 123),        // Green
             agent: Color::Rgb(189, 147, 249),      // Purple
@@ -847,7 +863,7 @@ impl ThemePalette {
             bg: Color::Rgb(46, 52, 64),        // Nord0 (polar night)
             fg: Color::Rgb(236, 239, 244),     // Nord6 (snow storm)
             surface: Color::Rgb(59, 66, 82),   // Nord1
-            hint: Color::Rgb(130, 144, 170),   // Nord3 (higher contrast)
+            hint: Color::Rgb(76, 86, 106),     // Nord3 (#4c566a - original Nord)
             border: Color::Rgb(67, 76, 94),    // Nord2
             user: Color::Rgb(163, 190, 140),   // Nord14 (aurora green)
             agent: Color::Rgb(136, 192, 208),  // Nord8 (frost cyan)

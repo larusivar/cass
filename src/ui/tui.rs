@@ -939,6 +939,7 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
                 shortcuts::TOGGLE_SELECT,
                 shortcuts::BULK_MENU
             ),
+            "Ctrl+Enter queue item; Ctrl+O open all queued".to_string(),
             format!("{} toggles focus (Results ⇄ Detail)", shortcuts::TAB_FOCUS),
             "[ / ] cycle detail tabs (Messages/Snippets/Raw)".to_string(),
         ],
@@ -2335,6 +2336,9 @@ pub fn run_tui(
     let mut pane_scroll_offset: usize = 0; // First visible pane index
     // Multi-select state: (pane_index, hit_index) tuples of selected items
     let mut selected: HashSet<(usize, usize)> = HashSet::new();
+    // Require double-confirm before opening a large queue of files
+    const OPEN_CONFIRM_THRESHOLD: usize = 12;
+    let mut open_confirm_armed = false;
     let mut focus_region = FocusRegion::Results;
     let mut detail_scroll: u16 = 0;
     let mut focus_flash_until: Option<Instant> = None;
@@ -3515,9 +3519,9 @@ pub fn run_tui(
                     };
                     footer_parts.push(format!("pane:{trimmed}"));
                 }
-                // Show selection count when items are selected
+                // Show queued count when items are selected (bead lsv.1)
                 if !selected.is_empty() {
-                    footer_parts.push(format!("✓ {} selected", selected.len()));
+                    footer_parts.push(format!("queued:{}", selected.len()));
                 }
                 if !matches!(context_window, ContextWindow::Medium) {
                     footer_parts.push(
@@ -4130,6 +4134,7 @@ pub fn run_tui(
                                 status =
                                     format!("Opened {} files in {}", selected_hits.len(), editor);
                                 selected.clear();
+                                open_confirm_armed = false;
                             }
                             1 => {
                                 // Copy all paths
@@ -4172,6 +4177,7 @@ pub fn run_tui(
                                         });
                                     if result.map(|s| s.success()).unwrap_or(false) {
                                         selected.clear();
+                                        open_confirm_armed = false;
                                         format!("✓ Copied {} paths to clipboard", paths.len())
                                     } else {
                                         "✗ Clipboard copy failed".to_string()
@@ -4224,6 +4230,7 @@ pub fn run_tui(
                                             });
                                         if result.map(|s| s.success()).unwrap_or(false) {
                                             selected.clear();
+                                            open_confirm_armed = false;
                                             format!(
                                                 "✓ Exported {} items as JSON to clipboard",
                                                 export.len()
@@ -4240,6 +4247,7 @@ pub fn run_tui(
                                 // Clear selection
                                 let count = selected.len();
                                 selected.clear();
+                                open_confirm_armed = false;
                                 status = format!("Cleared {count} selections");
                             }
                             _ => {}
@@ -4680,6 +4688,7 @@ pub fn run_tui(
                             if !selected.is_empty() {
                                 let count = selected.len();
                                 selected.clear();
+                                open_confirm_armed = false;
                                 status = format!("Cleared {count} selections");
                             } else if matches!(focus_region, FocusRegion::Detail) {
                                 focus_region = FocusRegion::Results;
@@ -4873,9 +4882,11 @@ pub fn run_tui(
                                 let key = (active_pane, pane.selected);
                                 if selected.contains(&key) {
                                     selected.remove(&key);
+                                    open_confirm_armed = false;
                                     status = format!("Deselected ({} selected)", selected.len());
                                 } else {
                                     selected.insert(key);
+                                    open_confirm_armed = false;
                                     status = format!(
                                         "Selected ({} total) · Ctrl+M toggle · A bulk actions · Esc clear",
                                         selected.len()
@@ -4893,6 +4904,7 @@ pub fn run_tui(
                                     for i in 0..pane.hits.len() {
                                         selected.remove(&(active_pane, i));
                                     }
+                                    open_confirm_armed = false;
                                     status = format!(
                                         "Deselected all in pane ({} total)",
                                         selected.len()
@@ -4902,11 +4914,77 @@ pub fn run_tui(
                                     for i in 0..pane.hits.len() {
                                         selected.insert((active_pane, i));
                                     }
+                                    open_confirm_armed = false;
                                     status = format!(
                                         "Selected all in pane ({} total) · A bulk actions",
                                         selected.len()
                                     );
                                 }
+                            }
+                        }
+                        // Multi-select: Ctrl+Enter enqueue (add to selection and move to next)
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(pane) = panes.get_mut(active_pane) {
+                                let key = (active_pane, pane.selected);
+                                selected.insert(key);
+                                open_confirm_armed = false;
+                                // Move to next item in the pane
+                                if pane.selected + 1 < pane.hits.len() {
+                                    pane.selected += 1;
+                                }
+                                status = format!(
+                                    "Queued ({}) · Ctrl+Enter add · Ctrl+O open all",
+                                    selected.len()
+                                );
+                            }
+                        }
+                        // Ctrl+O: Open all queued items in editor directly
+                        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if selected.is_empty() {
+                                status = "No items queued. Ctrl+Enter to queue items.".to_string();
+                                open_confirm_armed = false;
+                            } else if selected.len() >= OPEN_CONFIRM_THRESHOLD && !open_confirm_armed
+                            {
+                                open_confirm_armed = true;
+                                status = format!(
+                                    "Open {} queued items? Press Ctrl+O again to confirm.",
+                                    selected.len()
+                                );
+                            } else {
+                                let selected_hits: Vec<&SearchHit> = selected
+                                    .iter()
+                                    .filter_map(|(pane_idx, hit_idx)| {
+                                        panes.get(*pane_idx).and_then(|p| p.hits.get(*hit_idx))
+                                    })
+                                    .collect();
+                                let editor = std::env::var("EDITOR")
+                                    .or_else(|_| std::env::var("VISUAL"))
+                                    .unwrap_or_else(|_| "code".to_string());
+                                // Exit raw mode
+                                disable_raw_mode().ok();
+                                execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
+                                    .ok();
+                                for hit in &selected_hits {
+                                    let mut cmd = StdCommand::new(&editor);
+                                    if editor == "code" {
+                                        if let Some(ln) = hit.line_number {
+                                            cmd.arg("--goto")
+                                                .arg(format!("{}:{}", hit.source_path, ln));
+                                        } else {
+                                            cmd.arg(&hit.source_path);
+                                        }
+                                    } else {
+                                        cmd.arg(&hit.source_path);
+                                    }
+                                    let _ = cmd.status();
+                                }
+                                execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)
+                                    .ok();
+                                enable_raw_mode().ok();
+                                status =
+                                    format!("Opened {} files in {}", selected_hits.len(), editor);
+                                selected.clear();
+                                open_confirm_armed = false;
                             }
                         }
                         // Bulk action menu: A opens when items are selected
@@ -5130,6 +5208,7 @@ pub fn run_tui(
                             show_help = true;
                             help_last_interaction = Instant::now();
                             selected.clear();
+                            open_confirm_armed = false;
                             panes.clear();
                             results.clear();
                             dirty_since = Some(Instant::now());
@@ -5983,6 +6062,7 @@ pub fn run_tui(
                                     MAX_VISIBLE_PANES,
                                 );
                                 selected.clear();
+                                open_confirm_armed = false;
                                 // Start staggered reveal animation for fallback results (bead 013)
                                 if animations_enabled && !panes.is_empty() {
                                     reveal_anim_start = Some(Instant::now());

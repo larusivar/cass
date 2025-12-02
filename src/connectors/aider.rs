@@ -13,7 +13,7 @@ impl AiderConnector {
     }
 
     /// Find aider chat history files under the provided roots (limited depth to avoid wide scans).
-    fn find_chat_files(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    fn find_chat_files(roots: &[&Path]) -> Vec<std::path::PathBuf> {
         let mut files = Vec::new();
         for root in roots {
             if !root.exists() {
@@ -119,27 +119,46 @@ impl AiderConnector {
 
 impl Connector for AiderConnector {
     fn detect(&self) -> DetectionResult {
-        // Lightweight optimistic detection: aider writes `.aider.chat.history.md` in the
-        // workspace. We scan a couple small roots (cwd + optional env override) with
-        // shallow depth. Even if nothing is found we still return detected=true so that
-        // watcher-triggered reindex paths are not skipped.
-        let mut roots = vec![std::env::current_dir().unwrap_or_default()];
+        // Fast detection: only check for .aider.chat.history.md in CWD (no recursive scan).
+        // The expensive WalkDir scan is deferred to scan() where it's actually needed.
+        // Also check for CASS_AIDER_DATA_ROOT env var as a signal.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd_history = cwd.join(".aider.chat.history.md");
+
+        if cwd_history.exists() {
+            return DetectionResult {
+                detected: true,
+                evidence: vec![format!("found {}", cwd_history.display())],
+            };
+        }
+
         if let Some(override_root) = std::env::var_os("CASS_AIDER_DATA_ROOT") {
-            roots.push(std::path::PathBuf::from(override_root));
+            let override_path = std::path::PathBuf::from(&override_root);
+            let override_history = override_path.join(".aider.chat.history.md");
+            if override_history.exists() {
+                return DetectionResult {
+                    detected: true,
+                    evidence: vec![format!("found {}", override_history.display())],
+                };
+            }
+            // Even if file not found, user explicitly set the env var
+            return DetectionResult {
+                detected: true,
+                evidence: vec![format!(
+                    "CASS_AIDER_DATA_ROOT set to {}",
+                    override_path.display()
+                )],
+            };
         }
-        let files = Self::find_chat_files(&roots);
-        let mut evidence = vec!["aider connector active".to_string()];
-        if let Some(first) = files.first() {
-            evidence.push(format!("found {}", first.display()));
-        }
+
         DetectionResult {
-            detected: true,
-            evidence,
+            detected: false,
+            evidence: vec![],
         }
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        let files = Self::find_chat_files(std::slice::from_ref(&ctx.data_root));
+        let files = Self::find_chat_files(std::slice::from_ref(&ctx.data_root.as_path()));
 
         let mut conversations = Vec::new();
         for path in files {

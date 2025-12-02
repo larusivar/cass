@@ -63,14 +63,15 @@ impl Connector for CodexConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        // Use data_root only if it looks like a Codex home directory (for testing)
-        // Otherwise use the default home
-        let home = if ctx.data_root.join("sessions").exists()
-            || ctx
-                .data_root
-                .file_name()
-                .is_some_and(|n| n.to_str().unwrap_or("").contains("codex"))
-        {
+        // Use data_root only if it IS a Codex home directory (for testing).
+        // Check for `.codex` in path OR explicit directory name ending in "codex".
+        // This avoids false positives from unrelated "sessions" directories.
+        let is_codex_dir = ctx
+            .data_root
+            .to_str()
+            .map(|s| s.contains(".codex") || s.ends_with("/codex") || s.ends_with("\\codex"))
+            .unwrap_or(false);
+        let home = if is_codex_dir {
             ctx.data_root.clone()
         } else {
             Self::home()
@@ -126,11 +127,10 @@ impl Connector for CodexConnector {
                         .get("timestamp")
                         .and_then(crate::connectors::parse_timestamp);
 
-                    if let (Some(since), Some(ts)) = (ctx.since_ts, created)
-                        && ts <= since
-                    {
-                        continue;
-                    }
+                    // NOTE: Do NOT filter individual messages by timestamp here!
+                    // The file-level check in file_modified_since() is sufficient.
+                    // Filtering messages would cause older messages to be lost when
+                    // the file is re-indexed after new messages are added.
 
                     match entry_type {
                         "session_meta" => {
@@ -260,11 +260,8 @@ impl Connector for CodexConnector {
                             .get("timestamp")
                             .and_then(crate::connectors::parse_timestamp);
 
-                        if let (Some(since), Some(ts)) = (ctx.since_ts, created)
-                            && ts <= since
-                        {
-                            continue;
-                        }
+                        // NOTE: Do NOT filter individual messages by timestamp.
+                        // File-level check is sufficient for incremental indexing.
 
                         started_at = started_at.or(created);
                         ended_at = created.or(ended_at);

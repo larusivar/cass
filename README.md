@@ -46,7 +46,7 @@ install.ps1 -EasyMode -Verify
 ### 🖥️ Rich Terminal UI (TUI)
 - **Three-Pane Layout**: Filter bar (top), scrollable results (left), and syntax-highlighted details (right).
 - **Multi-Line Result Display**: Each result shows location and up to 3 lines of context; alternating stripes improve scanability.
-- **Live Status**: Footer shows real-time indexing progress with sparkline visualization (e.g., `Indexing 150/2000 (7%) ▁▂▄▆█`) and active filters.
+- **Live Status**: Footer shows real-time indexing progress—agent discovery count during scanning, then item progress with sparkline visualization (e.g., `📦 Indexing 150/2000 (7%) ▁▂▄▆█`)—plus active filters.
 - **Multi-Open Queue**: Queue multiple results with `Ctrl+Enter`, then open all in your editor with `Ctrl+O`. Confirmation prompt for large batches (≥12 items).
 - **Find-in-Detail**: Press `/` to search within the detail pane; matches highlighted with `n`/`N` navigation.
 - **Mouse Support**: Click to select results, scroll panes, or clear filters.
@@ -90,6 +90,7 @@ classDiagram
         +messages: Vec<NormalizedMessage>
     }
     class CodexConnector
+    class ClineConnector
     class ClaudeCodeConnector
     class GeminiConnector
     class OpenCodeConnector
@@ -99,6 +100,7 @@ classDiagram
     class AiderConnector
 
     Connector <|-- CodexConnector
+    Connector <|-- ClineConnector
     Connector <|-- ClaudeCodeConnector
     Connector <|-- GeminiConnector
     Connector <|-- OpenCodeConnector
@@ -108,6 +110,7 @@ classDiagram
     Connector <|-- AiderConnector
 
     CodexConnector ..> NormalizedConversation : emits
+    ClineConnector ..> NormalizedConversation : emits
     ClaudeCodeConnector ..> NormalizedConversation : emits
     GeminiConnector ..> NormalizedConversation : emits
     OpenCodeConnector ..> NormalizedConversation : emits
@@ -120,10 +123,10 @@ classDiagram
     classDef pastelEdge fill:#e6f7ff,stroke:#9bd5f5,color:#0f3a4d;
     class Connector pastel
     class NormalizedConversation pastelEdge
-    class CodexConnector,ClaudeCodeConnector,GeminiConnector,OpenCodeConnector,AmpConnector,CursorConnector,ChatGptConnector,AiderConnector pastel
+    class CodexConnector,ClineConnector,ClaudeCodeConnector,GeminiConnector,OpenCodeConnector,AmpConnector,CursorConnector,ChatGptConnector,AiderConnector pastel
 ```
 
-- **Polymorphic Scanning**: The indexer iterates over a `Vec<Box<dyn Connector>>`, unaware of the underlying file formats (JSONL, SQLite, specialized JSON).
+- **Polymorphic Scanning**: The indexer runs connector factories in parallel via rayon, creating fresh `Box<dyn Connector>` instances that are unaware of each other's underlying file formats (JSONL, SQLite, specialized JSON).
 - **Resilient Parsing**: Connectors handle legacy formats (e.g., integer vs ISO timestamps) and flatten complex tool-use blocks into searchable text.
 
 ---
@@ -192,8 +195,9 @@ flowchart LR
 
 ### Background Indexing & Watch Mode
 - **Non-Blocking**: The indexer runs in a background thread. You can search while it works.
+- **Parallel Discovery**: Connector detection and scanning run in parallel across all CPU cores using rayon, significantly reducing startup time when multiple agents are installed.
 - **Watch Mode**: Uses file system watchers (`notify`) to detect changes in agent logs. When you save a file or an agent replies, `cass` re-indexes just that conversation and refreshes the search view automatically.
-- **Progress Tracking**: Atomic counters track scanning/indexing phases, displayed unobtrusively in the TUI footer.
+- **Real-Time Progress**: The TUI footer updates in real-time showing discovered agents during scanning (e.g., "🔍 Discovering (5 agents found)") and indexing progress with sparkline visualization (e.g., "📦 Indexing 150/2000 (7%) ▁▂▄▆█").
 
 ## 🔍 Deep Dive: Internals
 
@@ -486,7 +490,7 @@ cargo test --test install_scripts
 
 ### Indexer (src/indexer/mod.rs)
 - Opens SQLite + Tantivy; `--full` clears tables/FTS and wipes Tantivy docs; `--force-rebuild` recreates index dir when schema changes.
-- Connector loop: detect → scan per connector, ingest normalized conversations into SQLite and Tantivy. Watch mode: debounced filesystem watcher, path classification per connector, since_ts tracked in `watch_state.json`, incremental reindex of touched sources. TUI startup spawns a background indexer with watch enabled.
+- Parallel connector loop: detect → scan runs concurrently across all connectors using rayon's parallel iterator, with atomic progress counters updating discovered agent count and conversation totals in real-time. Ingestion into SQLite and Tantivy happens sequentially after all scans complete. Watch mode: debounced filesystem watcher, path classification per connector, since_ts tracked in `watch_state.json`, incremental reindex of touched sources. TUI startup spawns a background indexer with watch enabled.
 
 ### Storage (src/storage/sqlite.rs)
 - Normalized relational model (agents, workspaces, conversations, messages, snippets, tags) with FTS mirror on messages. Single-transaction insert/upsert, append-only unless `--full`. `schema_version` guard; bundled modern SQLite.

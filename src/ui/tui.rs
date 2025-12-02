@@ -2757,7 +2757,8 @@ pub fn run_tui(
                     // Check if indexing is in progress - show prominent banner
                     let indexing_active = progress.as_ref().map(get_indexing_state);
 
-                    if let Some((phase, current, total, is_rebuild, pct, discovered)) = indexing_active
+                    if let Some((phase, current, total, is_rebuild, pct, discovered)) =
+                        indexing_active
                         && phase > 0
                     {
                         // Show indexing banner
@@ -2816,9 +2817,15 @@ pub fn run_tui(
                                         "█".repeat(filled),
                                         Style::default().fg(palette.accent),
                                     ),
-                                    Span::styled("░".repeat(empty), Style::default().fg(palette.hint)),
+                                    Span::styled(
+                                        "░".repeat(empty),
+                                        Style::default().fg(palette.hint),
+                                    ),
                                     Span::styled("]", Style::default().fg(palette.border)),
-                                    Span::styled(format!(" {pct}%"), Style::default().fg(palette.hint)),
+                                    Span::styled(
+                                        format!(" {pct}%"),
+                                        Style::default().fg(palette.hint),
+                                    ),
                                 ]));
                                 lines.push(Line::from(""));
                                 lines.push(Line::from(Span::styled(

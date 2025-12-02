@@ -175,7 +175,11 @@ pub fn run_index(
                     if let Some(p) = progress_ref {
                         p.total.fetch_add(convs.len(), Ordering::Relaxed);
                     }
-                    tracing::info!(connector = name, conversations = convs.len(), "parallel_scan_complete");
+                    tracing::info!(
+                        connector = name,
+                        conversations = convs.len(),
+                        "parallel_scan_complete"
+                    );
                     Some((name, convs))
                 }
                 Err(e) => {

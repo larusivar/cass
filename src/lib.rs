@@ -2604,7 +2604,13 @@ fn run_cli_search(
     // Priority: robot_format > json flag > display format > default plain
     let effective_robot = robot_format
         .or(if *json { Some(RobotFormat::Json) } else { None })
-        .or_else(|| if robot_auto { Some(RobotFormat::Json) } else { None });
+        .or_else(|| {
+            if robot_auto {
+                Some(RobotFormat::Json)
+            } else {
+                None
+            }
+        });
 
     // Parse aggregate fields if provided
     let agg_fields = aggregate
@@ -6105,8 +6111,7 @@ fn format_as_text(messages: &[serde_json::Value], include_tools: bool) -> String
                 for block in arr {
                     if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
                         if block_type == "tool_use" {
-                            let name =
-                                block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                             text.push_str(&format!("[Tool: {}]\n", name));
                         }
                     }
@@ -6514,7 +6519,8 @@ fn run_timeline(
             retryable: false,
         })?;
 
-    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64)> = Vec::new();
+    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64)> =
+        Vec::new();
     for row in rows {
         if let Ok(r) = row {
             sessions.push(r);
@@ -6545,7 +6551,10 @@ fn run_timeline(
             TimelineGrouping::Hour | TimelineGrouping::Day => {
                 let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
                 for (id, agent, title, started, ended, path, msg_count) in &sessions {
-                    let dt = Utc.timestamp_opt(*started, 0).single().unwrap_or_else(Utc::now);
+                    let dt = Utc
+                        .timestamp_opt(*started, 0)
+                        .single()
+                        .unwrap_or_else(Utc::now);
                     let key = match group_by {
                         TimelineGrouping::Hour => dt.format("%Y-%m-%d %H:00").to_string(),
                         TimelineGrouping::Day => dt.format("%Y-%m-%d").to_string(),
@@ -6569,8 +6578,14 @@ fn run_timeline(
             serde_json::to_string_pretty(&output).unwrap_or_default()
         );
     } else {
-        let start_dt = Utc.timestamp_opt(start_ts, 0).single().unwrap_or_else(Utc::now);
-        let end_dt = Utc.timestamp_opt(end_ts, 0).single().unwrap_or_else(Utc::now);
+        let start_dt = Utc
+            .timestamp_opt(start_ts, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+        let end_dt = Utc
+            .timestamp_opt(end_ts, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
 
         println!("\n📅 Activity Timeline");
         println!(
@@ -6587,7 +6602,10 @@ fn run_timeline(
 
         let mut current_group = String::new();
         for (_id, agent, title, started, ended, _path, msg_count) in &sessions {
-            let dt = Utc.timestamp_opt(*started, 0).single().unwrap_or_else(Utc::now);
+            let dt = Utc
+                .timestamp_opt(*started, 0)
+                .single()
+                .unwrap_or_else(Utc::now);
 
             let group_key = match group_by {
                 TimelineGrouping::Hour => dt.format("%Y-%m-%d %H:00").to_string(),
@@ -6656,12 +6674,18 @@ fn parse_datetime_flexible(s: &str) -> Option<i64> {
     match s.to_lowercase().as_str() {
         "today" => {
             let start = now.date_naive().and_hms_opt(0, 0, 0)?;
-            Local.from_local_datetime(&start).single().map(|d| d.timestamp())
+            Local
+                .from_local_datetime(&start)
+                .single()
+                .map(|d| d.timestamp())
         }
         "yesterday" => {
             let yesterday = (now - chrono::Duration::days(1)).date_naive();
             let start = yesterday.and_hms_opt(0, 0, 0)?;
-            Local.from_local_datetime(&start).single().map(|d| d.timestamp())
+            Local
+                .from_local_datetime(&start)
+                .single()
+                .map(|d| d.timestamp())
         }
         _ => {
             if let Some(days_str) = s.strip_suffix('d') {

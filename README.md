@@ -53,6 +53,35 @@ install.ps1 -EasyMode -Verify
 
 ---
 
+## 💡 Why This Exists
+
+### The Problem
+
+AI coding agents are transforming how we write software. Claude Code, Codex, Cursor, Copilot, Aider—each creates a trail of conversations, debugging sessions, and problem-solving attempts. But this wealth of knowledge is **scattered and unsearchable**:
+
+- **Fragmented storage**: Each agent stores data differently—JSONL files, SQLite databases, markdown logs, proprietary JSON formats
+- **No cross-agent visibility**: Solutions discovered in Cursor are invisible when you're using Claude Code
+- **Lost context**: That brilliant debugging session from two weeks ago? Good luck finding it by scrolling through files
+- **No semantic search**: File-based grep doesn't understand code structure or natural language queries
+
+### The Solution
+
+`cass` treats your coding agent history as a **unified knowledge base**. It:
+
+1. **Normalizes** disparate formats into a common schema
+2. **Indexes** everything with a purpose-built full-text search engine
+3. **Surfaces** relevant past conversations in milliseconds
+4. **Respects** your privacy—everything stays local, nothing phones home
+
+### Who Benefits
+
+- **Individual developers**: Find that solution you know you've seen before
+- **Teams**: Share institutional knowledge across different tool preferences
+- **AI agents themselves**: Let your current agent learn from all your past agents (via robot mode)
+- **Power users**: Build workflows that leverage your complete coding history
+
+---
+
 ## ✨ Key Features
 
 ### ⚡ Instant Search (Sub-60ms Latency)
@@ -239,6 +268,343 @@ Data integrity is paramount. `cass` treats the SQLite database (`src/storage/sql
 - **Immutable History**: When an agent adds a message to a conversation, we don't update the existing row. We insert the new message linked to the conversation ID.
 - **Deduplication**: The connector layer uses content hashing to prevent duplicate messages if an agent re-writes a file.
 - **Versioning**: A `schema_version` meta-table and strict migration path ensure that upgrades (like the recent move to v3) are safe and atomic.
+
+---
+
+## 🔤 Query Language Reference
+
+`cass` supports a rich query syntax designed for both humans and machines.
+
+### Basic Queries
+
+| Query | Matches |
+|-------|---------|
+| `error` | Messages containing "error" (case-insensitive) |
+| `python error` | Messages containing both "python" AND "error" |
+| `"authentication failed"` | Exact phrase match |
+| `auth fail` | Both terms, in any order |
+
+### Wildcard Patterns
+
+| Pattern | Type | Matches | Performance |
+|---------|------|---------|-------------|
+| `auth*` | Prefix | "auth", "authentication", "authorize" | Fast (uses edge n-grams) |
+| `*tion` | Suffix | "authentication", "function", "exception" | Slower (regex scan) |
+| `*config*` | Substring | "reconfigure", "config.json", "misconfigured" | Slowest (full regex) |
+| `test_*` | Prefix | "test_user", "test_auth", "test_helpers" | Fast |
+
+**Tip**: Prefix wildcards (`foo*`) are optimized via pre-computed edge n-grams. Suffix and substring wildcards fall back to regex and are slower on large indexes.
+
+### Query Modifiers
+
+```bash
+# Field-specific search (in robot mode)
+cass search "error" --agent claude --workspace /path/to/project
+
+# Time-bounded search
+cass search "bug" --since 2024-01-01 --until 2024-01-31
+cass search "bug" --today
+cass search "bug" --days 7
+
+# Combined filters
+cass search "authentication" --agent codex --workspace myproject --week
+```
+
+### Match Types
+
+Search results include a `match_type` indicator:
+
+| Type | Meaning | Score Boost |
+|------|---------|-------------|
+| `exact` | Query terms found verbatim | Highest |
+| `prefix` | Matched via prefix expansion (e.g., `auth*`) | High |
+| `suffix` | Matched via suffix pattern | Medium |
+| `substring` | Matched via substring pattern | Lower |
+| `fuzzy` | Auto-fallback match when exact results sparse | Lowest |
+
+### Auto-Fuzzy Fallback
+
+When an exact query returns fewer than 3 results, `cass` automatically retries with wildcard expansion:
+- `auth` → `*auth*`
+- Results are flagged with `wildcard_fallback: true` in robot mode
+- TUI shows a "fuzzy" indicator in the status bar
+
+---
+
+## ⌨️ Complete Keyboard Reference
+
+### Global Keys
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Quit |
+| `F1` or `?` | Toggle help screen |
+| `F2` | Toggle dark/light theme |
+| `Ctrl+B` | Toggle border style (rounded/plain) |
+| `Ctrl+Shift+R` | Force re-index |
+| `Ctrl+Shift+Del` | Reset all TUI state |
+
+### Search Bar (Query Input)
+
+| Key | Action |
+|-----|--------|
+| Type | Live search as you type |
+| `Enter` | Open selected result in `$EDITOR` |
+| `Esc` | Clear query / exit search |
+| `Up`/`Down` | Navigate query history |
+| `Ctrl+R` | Cycle through query history |
+| `Backspace` | Delete character; if empty, remove last filter chip |
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| `Up`/`Down` | Move selection in results list |
+| `Left`/`Right` | Switch focus between results and detail pane |
+| `Tab`/`Shift+Tab` | Cycle focus: search → results → detail |
+| `PageUp`/`PageDown` | Scroll by page |
+| `Home`/`End` | Jump to first/last result |
+| `Alt+h/j/k/l` | Vim-style navigation (left/down/up/right) |
+
+### Filtering
+
+| Key | Action |
+|-----|--------|
+| `F3` | Open agent filter palette |
+| `F4` | Open workspace filter palette |
+| `F5` | Set "from" time filter |
+| `F6` | Set "to" time filter |
+| `Shift+F3` | Scope to currently selected result's agent |
+| `Shift+F4` | Clear workspace filter |
+| `Shift+F5` | Cycle time presets: 24h → 7d → 30d → all |
+| `Ctrl+Del` | Clear all active filters |
+
+### Modes & Display
+
+| Key | Action |
+|-----|--------|
+| `F7` | Cycle context window size: S → M → L → XL |
+| `F9` | Toggle match mode: prefix (default) ↔ standard |
+| `F12` | Cycle ranking: recent → balanced → relevance → quality |
+| `Shift+`/`=` | Increase items per pane (density) |
+| `-` | Decrease items per pane |
+
+### Selection & Actions
+
+| Key | Action |
+|-----|--------|
+| `m` | Toggle selection on current result |
+| `Ctrl+A` | Select/deselect all visible results |
+| `A` | Open bulk actions menu (when items selected) |
+| `Ctrl+Enter` | Add to multi-open queue |
+| `Ctrl+O` | Open all queued items in editor |
+| `y` | Copy current item (path or content to clipboard) |
+| `Ctrl+Y` | Copy all selected items |
+
+### Detail Pane
+
+| Key | Action |
+|-----|--------|
+| `Space` | Toggle full-screen detail view |
+| `/` | Start find-in-detail search |
+| `n` | Jump to next match (in find mode) |
+| `N` | Jump to previous match |
+| `g` | Scroll to top (in full-screen) |
+| `G` | Scroll to bottom (in full-screen) |
+| `c` | Copy visible content |
+| `o` | Open in external viewer |
+
+### Mouse Support
+
+- **Click** on result to select
+- **Click** on filter chip to edit/remove
+- **Scroll** in any pane
+- **Double-click** to open result
+
+---
+
+## 📊 Ranking & Scoring Explained
+
+### The Four Ranking Modes
+
+Cycle through modes with `F12`:
+
+1. **Recent Heavy** (default): Strongly favors recent conversations
+   - Score = `text_relevance × 0.3 + recency × 0.7`
+   - Best for: "What was I working on?"
+
+2. **Balanced**: Equal weight to relevance and recency
+   - Score = `text_relevance × 0.5 + recency × 0.5`
+   - Best for: General-purpose search
+
+3. **Relevance**: Prioritizes text match quality
+   - Score = `text_relevance × 0.8 + recency × 0.2`
+   - Best for: "Find the best explanation of X"
+
+4. **Match Quality**: Penalizes fuzzy/wildcard matches
+   - Score = `text_relevance × 0.7 + recency × 0.2 + match_exactness × 0.1`
+   - Best for: Precise technical searches
+
+### Score Components
+
+- **Text Relevance (BM25)**: Tantivy's implementation of Okapi BM25, considering:
+  - Term frequency in document
+  - Inverse document frequency across corpus
+  - Document length normalization
+
+- **Recency**: Exponential decay from current time
+  - Documents from today: ~1.0
+  - Documents from last week: ~0.7
+  - Documents from last month: ~0.3
+
+- **Match Exactness**: Bonus for exact matches vs wildcards
+  - Exact phrase: 1.0
+  - Prefix match: 0.8
+  - Suffix/Substring: 0.5
+  - Fuzzy fallback: 0.3
+
+---
+
+## 🔄 The Normalization Pipeline
+
+Each connector transforms agent-specific formats into a unified schema:
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  Agent Files    │ ──▶ │    Connector     │ ──▶ │  Normalized     │
+│  (proprietary)  │     │  (per-agent)     │     │  Conversation   │
+└─────────────────┘     └──────────────────┘     └─────────────────┘
+     JSONL                   detect()                agent_slug
+     SQLite                  scan()                  workspace
+     Markdown                                        messages[]
+     JSON                                            created_at
+```
+
+### Role Normalization
+
+Different agents use different role names:
+
+| Agent | Original | Normalized |
+|-------|----------|------------|
+| Claude Code | `human`, `assistant` | `user`, `assistant` |
+| Codex | `user`, `assistant` | `user`, `assistant` |
+| ChatGPT | `user`, `assistant`, `system` | `user`, `assistant`, `system` |
+| Cursor | `user`, `assistant` | `user`, `assistant` |
+| Aider | (markdown headers) | `user`, `assistant` |
+
+### Timestamp Handling
+
+Agents store timestamps inconsistently:
+
+| Format | Example | Handling |
+|--------|---------|----------|
+| Unix milliseconds | `1699900000000` | Direct conversion |
+| Unix seconds | `1699900000` | Multiply by 1000 |
+| ISO 8601 | `2024-01-15T10:30:00Z` | Parse with chrono |
+| Missing | `null` | Use file modification time |
+
+### Content Flattening
+
+Tool calls, code blocks, and nested structures are flattened for searchability:
+
+```json
+// Original (Claude Code)
+{"type": "tool_use", "name": "Read", "input": {"path": "/foo/bar.rs"}}
+
+// Flattened for indexing
+"[Tool: Read] path=/foo/bar.rs"
+```
+
+---
+
+## 🧹 Deduplication Strategy
+
+The same conversation content can appear multiple times due to:
+- Agent file rewrites
+- Backup files
+- Symlinked directories
+- Re-indexing
+
+### Content-Based Deduplication
+
+`cass` uses a multi-layer deduplication strategy:
+
+1. **Message Hash**: SHA-256 of `(role + content + timestamp)`
+   - Identical messages in different files are stored once
+
+2. **Conversation Fingerprint**: Hash of first N message hashes
+   - Detects duplicate conversation files
+
+3. **Search-Time Dedup**: Results are deduplicated by content similarity
+   - Even if stored twice, shown once in results
+
+### Noise Filtering
+
+Common low-value content is filtered from results:
+- Empty messages
+- Pure whitespace
+- System prompts (unless searching for them)
+- Repeated tool acknowledgments
+
+---
+
+## 💼 Use Cases & Workflows
+
+### 1. "I solved this before..."
+
+```bash
+# Find past solutions for similar errors
+cass search "TypeError: Cannot read property" --days 30
+
+# In TUI: F12 to switch to "relevance" mode for best matches
+```
+
+### 2. Cross-Agent Knowledge Transfer
+
+```bash
+# What has ANY agent said about authentication in this project?
+cass search "authentication" --workspace /path/to/project
+
+# Export findings for a new agent's context
+cass export /path/to/relevant/session.jsonl --format markdown
+```
+
+### 3. Daily/Weekly Review
+
+```bash
+# What did I work on today?
+cass timeline --today --json | jq '.groups[].conversations'
+
+# TUI: Press Shift+F5 to cycle through time filters
+```
+
+### 4. Debugging Workflow Archaeology
+
+```bash
+# Find all debugging sessions for a specific file
+cass search "debug src/auth/login.rs" --agent claude
+
+# Expand context around a specific line in a session
+cass expand /path/to/session.jsonl -n 150 -C 10
+```
+
+### 5. Agent-to-Agent Handoff
+
+```bash
+# Current agent searches what previous agents learned
+cass search "database migration strategy" --robot --fields minimal
+
+# Get full context for a relevant session
+cass view /path/to/session.jsonl -n 42 --json
+```
+
+### 6. Building Training Data
+
+```bash
+# Export high-quality problem-solving sessions
+cass search "bug fix" --robot --limit 100 | \
+  jq '.hits[] | select(.score > 0.8)' > training_candidates.json
+```
 
 ---
 

@@ -409,8 +409,25 @@ fn api_version_matches_golden_contract() {
         "api-version should not log to stderr"
     );
     let actual: Value = serde_json::from_slice(&output.stdout).expect("valid api-version json");
+
+    // Check stable contract fields against fixture
     let expected = read_fixture("api_version.json");
-    assert_eq!(actual, expected, "api-version contract drifted");
+    assert_eq!(
+        actual["api_version"], expected["api_version"],
+        "api_version field drifted"
+    );
+    assert_eq!(
+        actual["contract_version"], expected["contract_version"],
+        "contract_version field drifted"
+    );
+
+    // Verify crate_version matches Cargo.toml (dynamic, not from fixture)
+    let cargo_version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        actual["crate_version"].as_str().unwrap(),
+        cargo_version,
+        "crate_version should match Cargo.toml version"
+    );
 }
 
 #[test]
